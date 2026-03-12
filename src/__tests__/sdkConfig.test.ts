@@ -42,6 +42,24 @@ describe('clmmMainnet', () => {
   it('has an aggregatorUrl', () => {
     expect(clmmMainnet.aggregatorUrl).toMatch(/^https?:\/\//);
   });
+
+  it('has a swapCountUrl pointing to production cetus.zone', () => {
+    expect(clmmMainnet.swapCountUrl).toMatch(/cetus\.zone/);
+  });
+
+  it('does NOT have a faucet (mainnet has no test-token faucet)', () => {
+    // faucet is a testnet-only facility; its presence on mainnet would be misleading
+    expect((clmmMainnet as any).faucet).toBeUndefined();
+  });
+
+  it('has a deepbook_endpoint_v2 address', () => {
+    expect(clmmMainnet.deepbook_endpoint_v2.package_id).toMatch(/^0x/);
+    expect(clmmMainnet.deepbook_endpoint_v2.published_at).toMatch(/^0x/);
+  });
+
+  it('has a deepbook address', () => {
+    expect(clmmMainnet.deepbook.package_id).toMatch(/^0x/);
+  });
 });
 
 describe('clmmTestnet', () => {
@@ -66,6 +84,15 @@ describe('clmmTestnet', () => {
 
   it('has an aggregatorUrl pointing to devcetus.com (testnet aggregator)', () => {
     expect(clmmTestnet.aggregatorUrl).toMatch(/devcetus\.com/);
+  });
+
+  it('has a faucet (testnet only)', () => {
+    expect((clmmTestnet as any).faucet).toBeDefined();
+    expect((clmmTestnet as any).faucet.package_id).toMatch(/^0x/);
+  });
+
+  it('has a swapCountUrl', () => {
+    expect(clmmTestnet.swapCountUrl).toMatch(/^https?:\/\//);
   });
 
   it('mainnet and testnet use different package_id values for clmm_pool', () => {

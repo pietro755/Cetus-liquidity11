@@ -54,6 +54,16 @@ export function loadConfig(): BotConfig {
     throw new Error(`Invalid NETWORK value: ${network}. Must be 'mainnet' or 'testnet'`);
   }
 
+  const maxSlippage = getEnvNumber('MAX_SLIPPAGE', 0.01);
+
+  // Safety guard: a slippage of ≥ 100 % would hand over all funds to MEV/sandwich attacks
+  // on mainnet.  Reject any value outside (0, 1).
+  if (maxSlippage <= 0 || maxSlippage >= 1) {
+    throw new Error(
+      `MAX_SLIPPAGE must be greater than 0 and less than 1 (100 %). Got: ${maxSlippage}`,
+    );
+  }
+
   return {
     network,
     suiRpcUrl: getEnvVar('SUI_RPC_URL', false) || undefined,
@@ -64,7 +74,7 @@ export function loadConfig(): BotConfig {
     upperTick: getEnvVar('UPPER_TICK', false) ? parseInt(getEnvVar('UPPER_TICK', false)) : undefined,
     tokenAAmount: getEnvVar('TOKEN_A_AMOUNT', false) || undefined,
     tokenBAmount: getEnvVar('TOKEN_B_AMOUNT', false) || undefined,
-    maxSlippage: getEnvNumber('MAX_SLIPPAGE', 0.01),
+    maxSlippage,
     gasBudget: getEnvNumber('GAS_BUDGET', 50000000),
     logLevel: (getEnvVar('LOG_LEVEL', false) || 'info') as 'debug' | 'info' | 'warn' | 'error',
     verboseLogs: getEnvBoolean('VERBOSE_LOGS', false),

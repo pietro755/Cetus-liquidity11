@@ -60,8 +60,9 @@ npm run test:watch  # watch mode
 npm run test:coverage  # with coverage report
 ```
 
-The test suite covers config loading (including testnet network selection), pool
-range detection, SDK config correctness for both networks, and the rebalance
+The test suite covers config loading (including mainnet/testnet network selection and
+slippage safety), pool range detection, SDK config correctness for both networks,
+retry/backoff resilience, `CetusSDKService` input validation, and the rebalance
 flow in dry-run mode — all without any external network I/O.
 
 ## Configuration
@@ -75,7 +76,7 @@ flow in dry-run mode — all without any external network I/O.
 | `CHECK_INTERVAL` | | `60` | Seconds between checks |
 | `LOWER_TICK` | | auto | Lower tick for new position |
 | `UPPER_TICK` | | auto | Upper tick for new position |
-| `MAX_SLIPPAGE` | | `0.01` | Max slippage (1%) |
+| `MAX_SLIPPAGE` | | `0.01` | Max slippage — must be > 0 and < 1 (i.e. 0–100 % exclusive) |
 | `GAS_BUDGET` | | `50000000` | Gas budget in MIST |
 | `LOG_LEVEL` | | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `DRY_RUN` | | `false` | Simulate without executing |
@@ -111,9 +112,11 @@ src/
     logger.ts           Timestamped console logger
     retry.ts            Exponential-backoff retry helper
   __tests__/
-    config.test.ts      Config loading unit tests
+    config.test.ts      Config loading + slippage safety tests (mainnet + testnet)
     monitor.test.ts     isPositionInRange unit tests
     sdkConfig.test.ts   SDK config correctness tests (mainnet + testnet)
+    sdkService.test.ts  CetusSDKService input validation tests
+    retry.test.ts       isNetworkError + retryWithBackoff tests
     rebalance.test.ts   Rebalance dry-run and guard tests
 .env.example            Configuration template
 ```
@@ -123,6 +126,7 @@ src/
 - **Never commit your `.env` file** — it contains your private key.
 - Use a dedicated bot wallet with only the tokens needed.
 - Always test with `DRY_RUN=true` first (on testnet before mainnet).
+- `MAX_SLIPPAGE` is validated at startup: values ≥ 1.0 (100 %) are rejected to prevent catastrophic sandwich attacks on mainnet.
 
 ## License
 

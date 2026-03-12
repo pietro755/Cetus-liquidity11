@@ -42,6 +42,15 @@ describe('loadConfig – network', () => {
     expect(loadConfig().network).toBe('testnet');
   });
 
+  it('accepts explicit "mainnet"', () => {
+    process.env.NETWORK = 'mainnet';
+    process.env.PRIVATE_KEY = VALID_KEY;
+    process.env.POOL_ADDRESS = VALID_POOL;
+
+    const { loadConfig } = loadFresh();
+    expect(loadConfig().network).toBe('mainnet');
+  });
+
   it('rejects an unknown network value', () => {
     process.env.NETWORK = 'devnet';
     process.env.PRIVATE_KEY = VALID_KEY;
@@ -122,5 +131,56 @@ describe('loadConfig – optional numeric & boolean variables', () => {
     const cfg = loadConfig();
     expect(cfg.lowerTick).toBeUndefined();
     expect(cfg.upperTick).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// maxSlippage safety validation (mainnet critical)
+// ---------------------------------------------------------------------------
+
+describe('loadConfig – maxSlippage safety guard', () => {
+  beforeEach(() => {
+    process.env.PRIVATE_KEY = VALID_KEY;
+    process.env.POOL_ADDRESS = VALID_POOL;
+    process.env.NETWORK = 'mainnet';
+  });
+
+  it('accepts the default slippage of 0.01 (1 %)', () => {
+    delete process.env.MAX_SLIPPAGE;
+    const { loadConfig } = loadFresh();
+    expect(loadConfig().maxSlippage).toBeCloseTo(0.01);
+  });
+
+  it('accepts a custom in-range value such as 0.005 (0.5 %)', () => {
+    process.env.MAX_SLIPPAGE = '0.005';
+    const { loadConfig } = loadFresh();
+    expect(loadConfig().maxSlippage).toBeCloseTo(0.005);
+  });
+
+  it('accepts the maximum safe value of 0.99 (just below 100 %)', () => {
+    process.env.MAX_SLIPPAGE = '0.99';
+    const { loadConfig } = loadFresh();
+    expect(loadConfig().maxSlippage).toBeCloseTo(0.99);
+  });
+
+  it('rejects a value of 0 (no slippage would always fail on-chain)', () => {
+    process.env.MAX_SLIPPAGE = '0';
+    // Module-level loadConfig() throws on require()
+    expect(() => loadFresh()).toThrow(/MAX_SLIPPAGE/);
+  });
+
+  it('rejects a value of 1.0 (100 % slippage — catastrophic on mainnet)', () => {
+    process.env.MAX_SLIPPAGE = '1.0';
+    expect(() => loadFresh()).toThrow(/MAX_SLIPPAGE/);
+  });
+
+  it('rejects a value of 2.0 (200 % slippage — obviously wrong)', () => {
+    process.env.MAX_SLIPPAGE = '2.0';
+    expect(() => loadFresh()).toThrow(/MAX_SLIPPAGE/);
+  });
+
+  it('rejects a negative value', () => {
+    process.env.MAX_SLIPPAGE = '-0.5';
+    expect(() => loadFresh()).toThrow(/MAX_SLIPPAGE/);
   });
 });

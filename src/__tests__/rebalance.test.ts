@@ -336,3 +336,69 @@ describe('rebalance – live path uses fix-token add-liquidity', () => {
     expect(callArgs).not.toHaveProperty('delta_liquidity');
   });
 });
+
+// ---------------------------------------------------------------------------
+// openNewPosition step 2 retries when NFT not yet available for consumption
+// ---------------------------------------------------------------------------
+
+describe('rebalance – step 2 retries on "not available for consumption"', () => {
+  afterEach(() => { delete process.env.DRY_RUN; });
+
+  it('succeeds after one retryable failure in add-liquidity', async () => {
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = { gasBudget: 50_000_000, maxSlippage: 0.01, lowerTick: 400, upperTick: 600 } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+
+    const mockSdk = {
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        // call 1: removeLiquidity succeeds
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        // call 2: openPosition (NFT) succeeds
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos' }],
+        })
+        // call 3: addLiquidity fails with the retryable error
+        .mockRejectedValueOnce(new Error('Object 0xnewpos is not available for consumption'))
+        // call 4: addLiquidity succeeds on retry
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockResolvedValue({ totalBalance: '1000000' }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    // createAddLiquidityFixTokenPayload must have been called twice (initial + 1 retry)
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(2);
+  });
+});

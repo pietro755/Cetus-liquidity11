@@ -630,41 +630,55 @@ export class RebalanceService {
       fix_amount_a,
     });
 
-    const addLiquidityParams = {
-      pool_id: poolInfo.poolAddress,
-      pos_id: newPositionId,
-      amount_a: amountA,
-      amount_b: amountB,
-      fix_amount_a,
-      slippage: this.config.maxSlippage,
-      is_open: false,
-      tick_lower: String(tickLower),
-      tick_upper: String(tickUpper),
-      collect_fee: false,
-      rewarder_coin_types: [] as string[],
-      coinTypeA: poolInfo.coinTypeA,
-      coinTypeB: poolInfo.coinTypeB,
-    };
+    let addDigest: string | undefined;
 
-    const addTx = await sdk.Position.createAddLiquidityFixTokenPayload(addLiquidityParams as any);
-    addTx.setGasBudget(this.config.gasBudget);
+    await this.retryTransaction(
+      async () => {
+        const addLiquidityParams = {
+          pool_id: poolInfo.poolAddress,
+          pos_id: newPositionId,
+          amount_a: amountA,
+          amount_b: amountB,
+          fix_amount_a,
+          slippage: this.config.maxSlippage,
+          is_open: false,
+          tick_lower: String(tickLower),
+          tick_upper: String(tickUpper),
+          collect_fee: false,
+          rewarder_coin_types: [] as string[],
+          coinTypeA: poolInfo.coinTypeA,
+          coinTypeB: poolInfo.coinTypeB,
+        };
 
-    const addResult = await suiClient.signAndExecuteTransaction({
-      transaction: addTx,
-      signer: keypair,
-      options: { showEffects: true, showEvents: true },
-    });
+        const addTx = await sdk.Position.createAddLiquidityFixTokenPayload(addLiquidityParams as any);
+        addTx.setGasBudget(this.config.gasBudget);
 
-    if (addResult.effects?.status?.status !== 'success') {
-      throw new Error(`Add liquidity failed: ${addResult.effects?.status?.error || 'Unknown'}`);
+        const addResult = await suiClient.signAndExecuteTransaction({
+          transaction: addTx,
+          signer: keypair,
+          options: { showEffects: true, showEvents: true },
+        });
+
+        if (addResult.effects?.status?.status !== 'success') {
+          throw new Error(`Add liquidity failed: ${addResult.effects?.status?.error || 'Unknown'}`);
+        }
+
+        addDigest = addResult.digest;
+        logger.info('New position opened with liquidity', {
+          positionId: newPositionId,
+          digest: addResult.digest,
+        });
+      },
+      'add liquidity to new position',
+      3,
+      2000,
+    );
+
+    if (!addDigest) {
+      throw new Error('Add liquidity did not return a transaction digest');
     }
 
-    logger.info('New position opened with liquidity', {
-      positionId: newPositionId,
-      digest: addResult.digest,
-    });
-
-    return { transactionDigest: addResult.digest };
+    return { transactionDigest: addDigest };
   }
 
   // ---------------------------------------------------------------------------

@@ -334,6 +334,17 @@ describe('rebalance – live path uses fix-token add-liquidity', () => {
     expect(callArgs).toHaveProperty('slippage', config.maxSlippage);
     expect(callArgs).toHaveProperty('is_open', false);
     expect(callArgs).not.toHaveProperty('delta_liquidity');
+
+    // coinTypeA and coinTypeB must be top-level (not nested) and present.
+    expect(callArgs).toHaveProperty('coinTypeA', pool.coinTypeA);
+    expect(callArgs).toHaveProperty('coinTypeB', pool.coinTypeB);
+
+    // amount_a and amount_b must be strings.
+    expect(typeof callArgs.amount_a).toBe('string');
+    expect(typeof callArgs.amount_b).toBe('string');
+
+    // fix_amount_a must be a boolean.
+    expect(typeof callArgs.fix_amount_a).toBe('boolean');
   });
 });
 

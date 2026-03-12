@@ -4,7 +4,7 @@ import { BotConfig } from '../config';
 import { logger } from '../utils/logger';
 import BN from 'bn.js';
 import { TransactionUtil } from '@cetusprotocol/cetus-sui-clmm-sdk';
-import type { CoinAsset, SwapParams } from '@cetusprotocol/cetus-sui-clmm-sdk';
+import type { AddLiquidityFixTokenParams, CoinAsset, SwapParams } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import type { BalanceChange } from '@mysten/sui/client';
 
 export interface RebalanceResult {
@@ -634,23 +634,23 @@ export class RebalanceService {
 
     await this.retryTransaction(
       async () => {
-        const addLiquidityParams = {
+        const addLiquidityParams: AddLiquidityFixTokenParams = {
           pool_id: poolInfo.poolAddress,
           pos_id: newPositionId,
-          amount_a: amountA,
-          amount_b: amountB,
-          fix_amount_a,
+          coinTypeA: poolInfo.coinTypeA,
+          coinTypeB: poolInfo.coinTypeB,
+          amount_a: String(amountA),
+          amount_b: String(amountB),
+          fix_amount_a: fix_amount_a,
           slippage: this.config.maxSlippage,
           is_open: false,
           tick_lower: String(tickLower),
           tick_upper: String(tickUpper),
           collect_fee: false,
-          rewarder_coin_types: [] as string[],
-          coinTypeA: poolInfo.coinTypeA,
-          coinTypeB: poolInfo.coinTypeB,
+          rewarder_coin_types: [],
         };
 
-        const addTx = await sdk.Position.createAddLiquidityFixTokenPayload(addLiquidityParams as any);
+        const addTx = await sdk.Position.createAddLiquidityFixTokenPayload(addLiquidityParams);
         addTx.setGasBudget(this.config.gasBudget);
 
         const addResult = await suiClient.signAndExecuteTransaction({

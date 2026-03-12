@@ -4,7 +4,7 @@ import { BotConfig } from '../config';
 import { logger } from '../utils/logger';
 import BN from 'bn.js';
 import { TransactionUtil } from '@cetusprotocol/cetus-sui-clmm-sdk';
-import type { CoinAsset, SwapParams } from '@cetusprotocol/cetus-sui-clmm-sdk';
+import type { AddLiquidityFixTokenParams, CoinAsset, SwapParams } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import type { BalanceChange } from '@mysten/sui/client';
 
 export interface RebalanceResult {
@@ -556,12 +556,29 @@ export class RebalanceService {
     amountB: string,
     storedLiquidity: string,
   ): Promise<{ transactionDigest?: string }> {
-    if (BigInt(amountA || '0') === 0n && BigInt(amountB || '0') === 0n) {
+    // Validate that amountA and amountB are valid non-negative integer strings.
+    const isValidAmountString = (v: string) => /^\d+$/.test(v);
+    if (!isValidAmountString(amountA)) {
+      throw new Error(`Invalid amountA: "${amountA}" is not a valid non-negative integer string`);
+    }
+    if (!isValidAmountString(amountB)) {
+      throw new Error(`Invalid amountB: "${amountB}" is not a valid non-negative integer string`);
+    }
+
+    if (BigInt(amountA) === 0n && BigInt(amountB) === 0n) {
       throw new Error('No token amounts available to open new position');
     }
 
     if (!storedLiquidity || BigInt(storedLiquidity) === 0n) {
       throw new Error('Stored liquidity value is zero — cannot open new position');
+    }
+
+    // Validate that tickLower and tickUpper are valid integers.
+    if (!Number.isInteger(tickLower)) {
+      throw new Error(`Invalid tickLower: ${tickLower} is not a valid integer`);
+    }
+    if (!Number.isInteger(tickUpper)) {
+      throw new Error(`Invalid tickUpper: ${tickUpper} is not a valid integer`);
     }
 
     const sdk = this.sdkService.getSdk();
@@ -613,6 +630,14 @@ export class RebalanceService {
     logger.info('Position NFT created', { positionId: newPositionId, digest: openResult.digest });
 
     // -----------------------------------------------------------------------
+    // Step 1.5: Verify the position object is accessible on the network.
+    //   There can be a race condition where the freshly-created NFT hasn't
+    //   yet propagated through the Sui full-node.  Poll getObject until the
+    //   object is visible before handing the position ID to the SDK.
+    // -----------------------------------------------------------------------
+    await this.waitForPositionObject(suiClient, newPositionId);
+
+    // -----------------------------------------------------------------------
     // Step 2: Add liquidity using the actual wallet token amounts.
     //   createAddLiquidityFixTokenPayload derives the correct delta_liquidity
     //   from the available token amounts for the new tick range and current
@@ -634,23 +659,34 @@ export class RebalanceService {
 
     await this.retryTransaction(
       async () => {
-        const addLiquidityParams = {
+        const addLiquidityParams: AddLiquidityFixTokenParams = {
           pool_id: poolInfo.poolAddress,
           pos_id: newPositionId,
+          coinTypeA: poolInfo.coinTypeA,
+          coinTypeB: poolInfo.coinTypeB,
           amount_a: amountA,
           amount_b: amountB,
-          fix_amount_a,
+          fix_amount_a: fix_amount_a,
           slippage: this.config.maxSlippage,
           is_open: false,
           tick_lower: String(tickLower),
           tick_upper: String(tickUpper),
           collect_fee: false,
-          rewarder_coin_types: [] as string[],
-          coinTypeA: poolInfo.coinTypeA,
-          coinTypeB: poolInfo.coinTypeB,
+          rewarder_coin_types: [],
         };
 
-        const addTx = await sdk.Position.createAddLiquidityFixTokenPayload(addLiquidityParams as any);
+        logger.info('createAddLiquidityFixTokenPayload — parameters', { ...addLiquidityParams });
+
+        let addTx;
+        try {
+          addTx = await sdk.Position.createAddLiquidityFixTokenPayload(addLiquidityParams);
+        } catch (sdkErr) {
+          logger.error('createAddLiquidityFixTokenPayload failed', {
+            error: sdkErr instanceof Error ? sdkErr.message : String(sdkErr),
+            params: addLiquidityParams,
+          });
+          throw sdkErr;
+        }
         addTx.setGasBudget(this.config.gasBudget);
 
         const addResult = await suiClient.signAndExecuteTransaction({
@@ -679,6 +715,59 @@ export class RebalanceService {
     }
 
     return { transactionDigest: addDigest };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private: wait for position object to be accessible on the Sui network
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Poll suiClient.getObject until the position object is accessible on the
+   * Sui network or maxAttempts is exhausted.  The first check is immediate
+   * (no delay before attempt 1); subsequent retries wait delayMs before
+   * checking again.
+   *
+   * This guards against the race condition where a newly-created position
+   * NFT hasn't yet propagated through the Sui full-node at the time of the
+   * add-liquidity call.
+   */
+  private async waitForPositionObject(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    suiClient: any,
+    positionId: string,
+    maxAttempts: number = 5,
+    delayMs: number = 1500,
+  ): Promise<void> {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (attempt > 1) {
+        logger.info(
+          `Position object not yet accessible — waiting ${delayMs}ms before retry`,
+          { positionId, attempt, maxAttempts },
+        );
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+
+      logger.info('Checking position object accessibility', { positionId, attempt, maxAttempts });
+
+      const response = await suiClient.getObject({
+        id: positionId,
+        options: { showType: true },
+      });
+
+      if (response.data) {
+        logger.info('Position object confirmed accessible', { positionId });
+        return;
+      }
+
+      logger.warn('Position object not yet visible on network', {
+        positionId,
+        attempt,
+        maxAttempts,
+        error: response.error,
+      });
+    }
+
+    throw new Error(`Position object ${positionId} not accessible after ${maxAttempts} attempts`);
   }
 
   // ---------------------------------------------------------------------------

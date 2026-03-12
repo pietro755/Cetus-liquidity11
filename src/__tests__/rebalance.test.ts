@@ -258,3 +258,81 @@ describe('rebalance – stored liquidity guard', () => {
     expect(result).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// openNewPosition uses createAddLiquidityFixTokenPayload (not createAddLiquidityPayload)
+// ---------------------------------------------------------------------------
+
+describe('rebalance – live path uses fix-token add-liquidity', () => {
+  afterEach(() => { delete process.env.DRY_RUN; });
+
+  it('calls createAddLiquidityFixTokenPayload with wallet amounts, not delta_liquidity', async () => {
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    // Return the same position on retry (used by removeLiquidity)
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = { gasBudget: 50_000_000, maxSlippage: 0.01, lowerTick: 400, upperTick: 600 } as any;
+
+    // Mock transaction stubs
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const createAddLiquidityPayload = jest.fn().mockResolvedValue(mockTxStub);
+
+    const mockSdk = {
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload,
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        // call 1: removeLiquidity
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        // call 2: openPosition (NFT)
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos' }],
+        })
+        // call 3: addLiquidity
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockResolvedValue({ totalBalance: '1000000' }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    // Must call the fix-token variant, NOT the delta-liquidity variant.
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(1);
+    expect(createAddLiquidityPayload).not.toHaveBeenCalled();
+
+    // The fix-token call must use wallet amounts, not a stored delta_liquidity field.
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    expect(callArgs).toHaveProperty('amount_a');
+    expect(callArgs).toHaveProperty('amount_b');
+    expect(callArgs).toHaveProperty('fix_amount_a');
+    expect(callArgs).toHaveProperty('slippage', config.maxSlippage);
+    expect(callArgs).toHaveProperty('is_open', false);
+    expect(callArgs).not.toHaveProperty('delta_liquidity');
+  });
+});

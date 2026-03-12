@@ -571,9 +571,8 @@ export class RebalanceService {
     logger.info('Opening new position — step 1: create position NFT', {
       tickLower,
       tickUpper,
-      storedLiquidity,
-      maxAmountA: amountA,
-      maxAmountB: amountB,
+      amountA,
+      amountB,
     });
 
     // -----------------------------------------------------------------------
@@ -614,23 +613,31 @@ export class RebalanceService {
     logger.info('Position NFT created', { positionId: newPositionId, digest: openResult.digest });
 
     // -----------------------------------------------------------------------
-    // Step 2: Add liquidity using the exact stored delta_liquidity.
-    //   max_amount_a / max_amount_b are the wallet balances — the hard cap that
-    //   prevents any extra funds from being drawn from the wallet.
+    // Step 2: Add liquidity using the actual wallet token amounts.
+    //   createAddLiquidityFixTokenPayload derives the correct delta_liquidity
+    //   from the available token amounts for the new tick range and current
+    //   price, ensuring the wallet is never overdrawn regardless of what the
+    //   old position's stored liquidity value was.
     // -----------------------------------------------------------------------
+    const bigAmtA = BigInt(amountA || '0');
+    // Fix token A when we have it; otherwise fix token B.
+    const fix_amount_a = bigAmtA > 0n;
+
     logger.info('Opening new position — step 2: deposit tokens', {
       positionId: newPositionId,
-      deltaLiquidity: storedLiquidity,
-      maxAmountA: amountA,
-      maxAmountB: amountB,
+      amountA,
+      amountB,
+      fix_amount_a,
     });
 
     const addLiquidityParams = {
       pool_id: poolInfo.poolAddress,
       pos_id: newPositionId,
-      delta_liquidity: storedLiquidity,
-      max_amount_a: amountA,
-      max_amount_b: amountB,
+      amount_a: amountA,
+      amount_b: amountB,
+      fix_amount_a,
+      slippage: this.config.maxSlippage,
+      is_open: false,
       tick_lower: String(tickLower),
       tick_upper: String(tickUpper),
       collect_fee: false,
@@ -639,7 +646,7 @@ export class RebalanceService {
       coinTypeB: poolInfo.coinTypeB,
     };
 
-    const addTx = await sdk.Position.createAddLiquidityPayload(addLiquidityParams as any);
+    const addTx = await sdk.Position.createAddLiquidityFixTokenPayload(addLiquidityParams as any);
     addTx.setGasBudget(this.config.gasBudget);
 
     const addResult = await suiClient.signAndExecuteTransaction({

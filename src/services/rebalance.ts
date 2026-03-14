@@ -7,6 +7,9 @@ import { TransactionUtil } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import type { AddLiquidityFixTokenParams, CoinAsset, SwapParams } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import type { BalanceChange } from '@mysten/sui/client';
 
+/** The canonical Sui coin type used to identify the native SUI token. */
+const SUI_COIN_TYPE = '0x2::sui::SUI';
+
 export interface RebalanceResult {
   success: boolean;
   transactionDigest?: string;
@@ -293,6 +296,12 @@ export class RebalanceService {
    * Read the current wallet balances for both pool tokens.
    * Called after removing liquidity to determine what tokens are available
    * before deciding whether and how much to swap.
+   *
+   * When SUI (`0x2::sui::SUI`) is one of the pool tokens, the gas budget is
+   * subtracted from its balance so that subsequent transactions always have
+   * enough SUI available to pay fees.  Without this reservation the add-
+   * liquidity transaction fails with `InsufficientCoinBalance` because the
+   * full SUI balance is passed as a token amount, leaving nothing for gas.
    */
   private async getWalletBalances(
     coinTypeA: string,
@@ -306,9 +315,23 @@ export class RebalanceService {
       suiClient.getBalance({ owner: ownerAddress, coinType: coinTypeB }),
     ]);
 
+    const gasBudget = BigInt(this.config.gasBudget);
+    const isSuiA = this.normalizeCoinType(coinTypeA) === this.normalizeCoinType(SUI_COIN_TYPE);
+    const isSuiB = this.normalizeCoinType(coinTypeB) === this.normalizeCoinType(SUI_COIN_TYPE);
+
+    let amountA = BigInt(balA.totalBalance || '0');
+    let amountB = BigInt(balB.totalBalance || '0');
+
+    if (isSuiA) {
+      amountA = amountA > gasBudget ? amountA - gasBudget : 0n;
+    }
+    if (isSuiB) {
+      amountB = amountB > gasBudget ? amountB - gasBudget : 0n;
+    }
+
     return {
-      amountA: balA.totalBalance,
-      amountB: balB.totalBalance,
+      amountA: amountA.toString(),
+      amountB: amountB.toString(),
     };
   }
 

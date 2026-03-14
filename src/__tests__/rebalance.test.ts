@@ -486,7 +486,9 @@ describe('rebalance – openNewPosition input validation', () => {
 
     expect(result).not.toBeNull();
     expect(result!.success).toBe(false);
-    expect(result!.error).toMatch(/Invalid amountA/);
+    // Both balances are '' which normalises to 0 — this triggers the
+    // "no token amounts" guard rather than the digit-format guard.
+    expect(result!.error).toMatch(/No token amounts available/);
   });
 
   it('returns failure when tickLower is not an integer', async () => {
@@ -803,5 +805,196 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
     // currentTick(700) >= tickUpper(600) → position only accepts token B → fix B
     const args = await runAndCaptureFixToken(700, SQRT_PRICE_ONE_TO_ONE, 400, 600, '1000000', '1000000');
     expect(args.fix_amount_a).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SUI gas reservation in getWalletBalances
+// ---------------------------------------------------------------------------
+
+describe('rebalance – SUI gas reservation in wallet balances', () => {
+  afterEach(() => { delete process.env.DRY_RUN; });
+
+  /**
+   * Helper: run a full rebalance with a SUI pool token and return the params
+   * passed to createAddLiquidityFixTokenPayload so we can inspect amount_a/amount_b.
+   */
+  async function runWithSuiToken(
+    coinTypeA: string,
+    coinTypeB: string,
+    balanceForA: string,
+    balanceForB: string,
+    gasBudget: number,
+  ): Promise<{ amount_a: string; amount_b: string }> {
+    process.env.DRY_RUN = 'false';
+
+    const pool = {
+      poolAddress: '0xpool',
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616', // sqrt price 1:1
+      coinTypeA,
+      coinTypeB,
+      tickSpacing: 10,
+    };
+
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool as any);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = {
+      gasBudget,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos' }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => ({
+        // Return the pre-configured balance for whichever token is being queried.
+        totalBalance: coinType === coinTypeA ? balanceForA : balanceForB,
+      })),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(1);
+    return createAddLiquidityFixTokenPayload.mock.calls[0][0] as { amount_a: string; amount_b: string };
+  }
+
+  it('subtracts gas budget from SUI amount_a when coinTypeA is SUI', async () => {
+    // coinTypeA = SUI with raw balance 200_000_000 MIST; gas budget = 50_000_000 MIST
+    // expected amount_a = 200_000_000 − 50_000_000 = 150_000_000
+    const args = await runWithSuiToken(
+      '0x2::sui::SUI', // coinTypeA
+      '0xcoinB',       // coinTypeB
+      '200000000',     // balanceForA (SUI)
+      '1000000',       // balanceForB (non-SUI)
+      50_000_000,
+    );
+    expect(args.amount_a).toBe('150000000');
+    expect(args.amount_b).toBe('1000000'); // non-SUI token unchanged
+  });
+
+  it('subtracts gas budget from SUI amount_b when coinTypeB is SUI', async () => {
+    // coinTypeB = SUI with raw balance 200_000_000 MIST; gas budget = 50_000_000 MIST
+    // expected amount_b = 200_000_000 − 50_000_000 = 150_000_000
+    const args = await runWithSuiToken(
+      '0xcoinA',       // coinTypeA (non-SUI)
+      '0x2::sui::SUI', // coinTypeB (SUI)
+      '500000',        // balanceForA (non-SUI)
+      '200000000',     // balanceForB (SUI)
+      50_000_000,
+    );
+    expect(args.amount_a).toBe('500000');   // non-SUI token unchanged
+    expect(args.amount_b).toBe('150000000'); // SUI: 200_000_000 − 50_000_000
+  });
+
+  it('clamps SUI amount to 0 when balance does not exceed gas budget, causing failure when no other token is available', async () => {
+    // raw SUI balance = 30_000_000 MIST < gas budget 50_000_000 MIST
+    // Both token balances are effectively 0 after clamping, so openNewPosition fails
+    // with "No token amounts available" — this is correct: the wallet cannot cover
+    // gas fees AND provide any liquidity.
+    process.env.DRY_RUN = 'false';
+
+    const pool = {
+      poolAddress: '0xpool',
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      coinTypeA: '0x2::sui::SUI',
+      coinTypeB: '0xcoinB',
+      tickSpacing: 10,
+    };
+
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool as any);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const mockSdk = {
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload: jest.fn().mockResolvedValue(mockTxStub),
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' }),
+      // SUI balance below gas budget; other token also zero
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => ({
+        totalBalance: coinType === '0x2::sui::SUI' ? '30000000' : '0',
+      })),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(false);
+    expect(result!.error).toMatch(/No token amounts available/);
+  });
+
+  it('does not modify balances when neither token is SUI', async () => {
+    // Both tokens are non-SUI — balances must pass through unchanged.
+    const args = await runWithSuiToken(
+      '0xcoinA',
+      '0xcoinB',
+      '500000',
+      '800000',
+      50_000_000,
+    );
+    expect(args.amount_a).toBe('500000');
+    expect(args.amount_b).toBe('800000');
   });
 });

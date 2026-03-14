@@ -60,11 +60,14 @@ class Logger {
 
   error(message: string, error?: any): void {
     if (this.level <= LogLevel.ERROR) {
-      const errorData = error instanceof Error ? {
-        message: error.message,
-        stack: error.stack,
-      } : error;
-      console.error(this.formatMessage('ERROR', message, errorData));
+      // Always append the error message so callers can see why an operation
+      // failed even when VERBOSE_LOGS is not enabled.  The full stack trace
+      // (and any extra context object) is still gated behind verbose mode.
+      const suffix = error instanceof Error ? `: ${error.message}` : '';
+      const errorData = this.verbose
+        ? (error instanceof Error ? { message: error.message, stack: error.stack } : error)
+        : undefined;
+      console.error(this.formatMessage('ERROR', `${message}${suffix}`, errorData));
     }
   }
 }

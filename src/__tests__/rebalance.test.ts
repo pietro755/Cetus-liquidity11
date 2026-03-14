@@ -690,3 +690,118 @@ describe('rebalance – position object verification before add-liquidity', () =
     expect(createAddLiquidityFixTokenPayload).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// fix_amount_a selection — in-range and out-of-range price scenarios
+// ---------------------------------------------------------------------------
+
+describe('rebalance – fix_amount_a is determined by price and tick range', () => {
+  afterEach(() => { delete process.env.DRY_RUN; });
+
+  /**
+   * Run a full rebalance with custom pool state (currentTickIndex, sqrtPrice)
+   * and wallet balances, then return the params captured from the
+   * createAddLiquidityFixTokenPayload call.
+   */
+  async function runAndCaptureFixToken(
+    currentTickIndex: number,
+    currentSqrtPrice: string,
+    tickLower: number,
+    tickUpper: number,
+    balanceA: string,
+    balanceB: string,
+  ): Promise<{ fix_amount_a: boolean }> {
+    process.env.DRY_RUN = 'false';
+
+    const pool = {
+      poolAddress: '0xpool',
+      currentTickIndex,
+      currentSqrtPrice,
+      coinTypeA: '0xcoinA',
+      coinTypeB: '0xcoinB',
+      tickSpacing: 10,
+    };
+
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool as any);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: tickLower,
+      upperTick: tickUpper,
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos' }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => ({
+        totalBalance: coinType === '0xcoinA' ? balanceA : balanceB,
+      })),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(1);
+    return createAddLiquidityFixTokenPayload.mock.calls[0][0] as { fix_amount_a: boolean };
+  }
+
+  // sqrtPrice = 2^64 → price = 1 A : 1 B (value comparison reduces to amount comparison)
+  const SQRT_PRICE_ONE_TO_ONE = '18446744073709551616';
+
+  it('fixes token B (fix_amount_a=false) when value_A > value_B (both tokens, in range)', async () => {
+    // amountA=2000000, amountB=1000000 at 1:1 price → value_A > value_B → fix B
+    const args = await runAndCaptureFixToken(500, SQRT_PRICE_ONE_TO_ONE, 400, 600, '2000000', '1000000');
+    expect(args.fix_amount_a).toBe(false);
+  });
+
+  it('fixes token A (fix_amount_a=true) when value_A <= value_B (both tokens, in range)', async () => {
+    // amountA=500000, amountB=1000000 at 1:1 price → value_A < value_B → fix A
+    const args = await runAndCaptureFixToken(500, SQRT_PRICE_ONE_TO_ONE, 400, 600, '500000', '1000000');
+    expect(args.fix_amount_a).toBe(true);
+  });
+
+  it('fixes token A (fix_amount_a=true) when price is below the new range', async () => {
+    // currentTick(100) < tickLower(400) → position only accepts token A → fix A
+    const args = await runAndCaptureFixToken(100, SQRT_PRICE_ONE_TO_ONE, 400, 600, '1000000', '1000000');
+    expect(args.fix_amount_a).toBe(true);
+  });
+
+  it('fixes token B (fix_amount_a=false) when price is at or above the new range', async () => {
+    // currentTick(700) >= tickUpper(600) → position only accepts token B → fix B
+    const args = await runAndCaptureFixToken(700, SQRT_PRICE_ONE_TO_ONE, 400, 600, '1000000', '1000000');
+    expect(args.fix_amount_a).toBe(false);
+  });
+});

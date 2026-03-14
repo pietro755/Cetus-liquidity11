@@ -438,7 +438,7 @@ export class RebalanceService {
     if (!swapTx) {
       logger.info('Using direct pool swap as fallback');
 
-      const sqrtPriceBig = BigInt(new BN(poolInfo.currentSqrtPrice).toString());
+      const sqrtPriceBig = BigInt(poolInfo.currentSqrtPrice);
       const TWO_128 = 2n ** 128n;
       const priceX128 = sqrtPriceBig * sqrtPriceBig;
       const slippageFactor = BigInt(Math.floor((1 - this.config.maxSlippage) * 10000));
@@ -645,8 +645,48 @@ export class RebalanceService {
     //   old position's stored liquidity value was.
     // -----------------------------------------------------------------------
     const bigAmtA = BigInt(amountA || '0');
-    // Fix token A when we have it; otherwise fix token B.
-    const fix_amount_a = bigAmtA > 0n;
+    const bigAmtB = BigInt(amountB || '0');
+
+    // Determine which token to fix for the add-liquidity call.
+    //
+    // The SDK's createAddLiquidityFixTokenPayload uses the fixed token's amount
+    // to derive delta_liquidity, then computes how much of the other token is
+    // required.  If the required amount of the non-fixed token exceeds what is
+    // available in the wallet, the transaction fails.
+    //
+    // Correct strategy:
+    //   • Price below range  (currentTick < tickLower)  → only token A accepted;
+    //                                                      always fix A.
+    //   • Price above range  (currentTick >= tickUpper) → only token B accepted;
+    //                                                      always fix B.
+    //   • Price in range                                → fix whichever token has
+    //                                                      the lower current value
+    //                                                      so the computed amount
+    //                                                      of the other token never
+    //                                                      exceeds our balance.
+    //
+    // Value comparison (in-range):
+    //   value_A_in_B = amountA × (sqrtPrice / 2^64)² = amountA × sqrtPrice² / 2^128
+    //   fix A when value_A ≤ value_B  ↔  amountA × sqrtPrice² ≤ amountB × 2^128
+    let fix_amount_a: boolean;
+    const currentTick = poolInfo.currentTickIndex;
+    if (bigAmtA === 0n) {
+      fix_amount_a = false; // Only B available
+    } else if (bigAmtB === 0n) {
+      fix_amount_a = true;  // Only A available
+    } else if (currentTick < tickLower) {
+      // Price is below range — the position only accepts token A.
+      fix_amount_a = true;
+    } else if (currentTick >= tickUpper) {
+      // Price is above range — the position only accepts token B.
+      fix_amount_a = false;
+    } else {
+      // Price is in range — fix the lower-value token so the SDK's computed
+      // amount of the other token stays within our wallet balance.
+      const sqrtPriceBig = BigInt(poolInfo.currentSqrtPrice);
+      const TWO_128 = 2n ** 128n;
+      fix_amount_a = bigAmtA * sqrtPriceBig * sqrtPriceBig <= bigAmtB * TWO_128;
+    }
 
     logger.info('Opening new position — step 2: deposit tokens', {
       positionId: newPositionId,

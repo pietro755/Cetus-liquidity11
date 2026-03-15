@@ -728,11 +728,18 @@ export class RebalanceService {
     }
 
     // Extract the new position ID from the object changes.
+    // We must only select objects that are directly owned by the wallet
+    // (AddressOwner).  Child objects owned by other objects cannot be used
+    // as transaction input arguments and will cause an "Objects owned by
+    // other objects cannot be used as input arguments" error at runtime.
     const positionChange = openResult.objectChanges?.find(
       (c): c is Extract<typeof c, { type: 'created' }> =>
         c.type === 'created' &&
         typeof c.objectType === 'string' &&
-        c.objectType.toLowerCase().includes('position'),
+        c.objectType.toLowerCase().includes('position') &&
+        typeof c.owner === 'object' &&
+        c.owner !== null &&
+        'AddressOwner' in (c.owner as object),
     );
 
     if (!positionChange?.objectId) {
@@ -904,10 +911,19 @@ export class RebalanceService {
 
       const response = await suiClient.getObject({
         id: positionId,
-        options: { showType: true },
+        options: { showOwner: true, showType: true },
       });
 
       if (response.data) {
+        // Guard: a position owned by another object (ObjectOwner) cannot be
+        // used as a direct transaction input.  Fail fast rather than letting
+        // the subsequent add-liquidity call surface a cryptic runtime error.
+        const owner = response.data.owner;
+        if (owner && typeof owner === 'object' && 'ObjectOwner' in (owner as object)) {
+          throw new Error(
+            `Position object ${positionId} is owned by another object and cannot be used as a transaction input argument`,
+          );
+        }
         logger.info('Position object confirmed accessible', { positionId });
         return;
       }

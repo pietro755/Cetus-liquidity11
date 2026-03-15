@@ -349,7 +349,7 @@ describe('rebalance – live path uses fix-token add-liquidity', () => {
         .mockResolvedValueOnce({
           effects: successEffect,
           digest: '0xopen',
-          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos' }],
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
         // call 3: addLiquidity
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
@@ -397,7 +397,7 @@ describe('rebalance – live path uses fix-token add-liquidity', () => {
     // getObject must have been called to verify the position is accessible.
     expect(mockSuiClient.getObject).toHaveBeenCalledWith({
       id: '0xnewpos',
-      options: { showType: true },
+      options: { showOwner: true, showType: true },
     });
   });
 });
@@ -442,7 +442,7 @@ describe('rebalance – step 2 retries on "not available for consumption"', () =
         .mockResolvedValueOnce({
           effects: successEffect,
           digest: '0xopen',
-          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos' }],
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
         // call 3: addLiquidity fails with the retryable error
         .mockRejectedValueOnce(new Error('Object 0xnewpos is not available for consumption'))
@@ -592,7 +592,7 @@ describe('rebalance – openNewPosition input validation', () => {
         .mockResolvedValueOnce({
           effects: successEffect,
           digest: '0xopen',
-          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos' }],
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         }),
       getBalance: jest.fn().mockResolvedValue({ totalBalance: '1000000' }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
@@ -654,7 +654,7 @@ describe('rebalance – position object verification before add-liquidity', () =
         .mockResolvedValueOnce({
           effects: successEffect,
           digest: '0xopen',
-          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos' }],
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
       getBalance: jest.fn().mockResolvedValue({ totalBalance: '1000000' }),
@@ -685,7 +685,7 @@ describe('rebalance – position object verification before add-liquidity', () =
     // getObject must have been called with the new position ID.
     expect(getObject).toHaveBeenCalledWith({
       id: '0xnewpos',
-      options: { showType: true },
+      options: { showOwner: true, showType: true },
     });
 
     // Verify ordering: getObject was called before createAddLiquidityFixTokenPayload.
@@ -736,6 +736,136 @@ describe('rebalance – position object verification before add-liquidity', () =
     expect(result!.error).toMatch(/not accessible after/);
 
     // The add-liquidity call must never have been made.
+    expect(createAddLiquidityFixTokenPayload).not.toHaveBeenCalled();
+  });
+
+  it('returns failure when objectChanges contains only a child-owned position (ObjectOwner)', async () => {
+    // Simulate the bug: openPosition returns an objectChange where the "position"
+    // object is owned by another object (ObjectOwner), not the wallet (AddressOwner).
+    // The objectChanges.find() guard must reject it, leaving positionChange undefined
+    // and throwing "Could not find new position ID".
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = { gasBudget: 50_000_000, maxSlippage: 0.01, lowerTick: 400, upperTick: 600 } as any;
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        // openPosition returns a position object owned by another object, not the wallet.
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [
+            {
+              type: 'created',
+              objectType: 'position',
+              objectId: '0xchildpos',
+              owner: { ObjectOwner: '0xparentobject' },
+            },
+          ],
+        }),
+      getBalance: jest.fn().mockResolvedValue({ totalBalance: '1000000' }),
+      getObject: jest.fn(),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(false);
+    expect(result!.error).toMatch(/Could not find new position ID/);
+    // add-liquidity must never be called when no valid position ID is found.
+    expect(createAddLiquidityFixTokenPayload).not.toHaveBeenCalled();
+  });
+
+  it('returns failure when waitForPositionObject detects an ObjectOwner-owned position', async () => {
+    // Simulate the case where the position object IS visible on the network via
+    // getObject but is owned by another object — waitForPositionObject must throw
+    // immediately rather than passing the bad ID to add-liquidity.
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = { gasBudget: 50_000_000, maxSlippage: 0.01, lowerTick: 400, upperTick: 600 } as any;
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        // openPosition returns a position owned by the wallet (passes the first guard).
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [
+            {
+              type: 'created',
+              objectType: 'position',
+              objectId: '0xnewpos',
+              owner: { AddressOwner: '0xwallet' },
+            },
+          ],
+        }),
+      getBalance: jest.fn().mockResolvedValue({ totalBalance: '1000000' }),
+      // getObject returns the position as ObjectOwner — simulates a wrapped object.
+      getObject: jest.fn().mockResolvedValue({
+        data: { objectId: '0xnewpos', owner: { ObjectOwner: '0xparentobject' } },
+      }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(false);
+    expect(result!.error).toMatch(/owned by another object/);
+    // add-liquidity must never be called.
     expect(createAddLiquidityFixTokenPayload).not.toHaveBeenCalled();
   });
 });
@@ -802,7 +932,7 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
         .mockResolvedValueOnce({
           effects: successEffect,
           digest: '0xopen',
-          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos' }],
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
       getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => ({
@@ -915,7 +1045,7 @@ describe('rebalance – SUI gas reservation in wallet balances', () => {
         .mockResolvedValueOnce({
           effects: successEffect,
           digest: '0xopen',
-          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos' }],
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
       getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => ({

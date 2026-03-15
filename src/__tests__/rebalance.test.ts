@@ -94,37 +94,91 @@ describe('checkAndRebalance – in-range position', () => {
 });
 
 // ---------------------------------------------------------------------------
-// checkAndRebalance — no positions
+// checkAndRebalance — no positions → creates initial position
 // ---------------------------------------------------------------------------
 
 describe('checkAndRebalance – no positions', () => {
-  it('returns null when there are no positions with liquidity', async () => {
-    const pool = makePoolInfo();
-    const monitor = makeMonitor([], pool);
-    const config = { gasBudget: 50_000_000, maxSlippage: 0.01 } as any;
+  beforeEach(() => { process.env.DRY_RUN = 'true'; });
+  afterEach(() => { delete process.env.DRY_RUN; });
 
-    process.env.DRY_RUN = 'false';
+  it('creates initial position (dry run) when no positions with liquidity exist', async () => {
+    const pool = makePoolInfo({ currentTickIndex: 0 });
+    const monitor = makeMonitor([], pool);
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: -100,
+      upperTick: 100,
+    } as any;
+
     const svc = new RebalanceService(makeSdkService(), monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
 
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    expect(result!.newPosition).toEqual({ tickLower: -100, tickUpper: 100 });
+    expect(result!.oldPosition).toBeUndefined();
   });
 
-  it('ignores positions with zero liquidity', async () => {
+  it('creates initial position (dry run) when only zero-liquidity positions exist', async () => {
     const pool = makePoolInfo({ currentTickIndex: 500 });
-    // Both positions have zero liquidity
+    // Both positions have zero liquidity — treated as "no position"
     const positions = [
       makePosition({ liquidity: '0' }),
       makePosition({ liquidity: '0' }),
     ];
     const monitor = makeMonitor(positions, pool);
-    const config = { gasBudget: 50_000_000, maxSlippage: 0.01 } as any;
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+    } as any;
 
-    process.env.DRY_RUN = 'false';
     const svc = new RebalanceService(makeSdkService(), monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
 
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    expect(result!.newPosition).toEqual({ tickLower: 400, tickUpper: 600 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createInitialPosition — default tick range (no env config)
+// ---------------------------------------------------------------------------
+
+describe('checkAndRebalance – no positions, default tick range', () => {
+  beforeEach(() => { process.env.DRY_RUN = 'true'; });
+  afterEach(() => { delete process.env.DRY_RUN; });
+
+  it('uses ±10 tick spacings centred on current tick when no lowerTick/upperTick configured', async () => {
+    const pool = makePoolInfo({ currentTickIndex: 1000, tickSpacing: 10 });
+    const monitor = makeMonitor([], pool);
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      // lowerTick / upperTick deliberately absent → use default range
+    } as any;
+
+    const svc = new RebalanceService(makeSdkService(), monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    const { tickLower, tickUpper } = result!.newPosition!;
+
+    // Both bounds must be multiples of tickSpacing (10)
+    expect(tickLower % 10).toBe(0);
+    expect(tickUpper % 10).toBe(0);
+
+    // Range must straddle the current tick
+    expect(tickLower).toBeLessThanOrEqual(1000);
+    expect(tickUpper).toBeGreaterThanOrEqual(1000);
+
+    // Width must be exactly ±10 tick spacings (20 * tickSpacing = 200 ticks)
+    expect(tickUpper - tickLower).toBe(200);
   });
 });
 
@@ -228,34 +282,27 @@ describe('checkAndRebalance – picks highest liquidity position', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Stored-liquidity guard: zero liquidity triggers error (non-dry-run)
+// Stored-liquidity guard: openNewPosition validates storedLiquidity when provided
 // ---------------------------------------------------------------------------
 
 describe('rebalance – stored liquidity guard', () => {
+  beforeEach(() => { process.env.DRY_RUN = 'true'; });
   afterEach(() => { delete process.env.DRY_RUN; });
 
-  it('returns failure when position liquidity is "0"', async () => {
-    process.env.DRY_RUN = 'false';
-
+  it('creates initial position (dry run) when only zero-liquidity position exists', async () => {
+    // Zero-liquidity positions are filtered out; createInitialPosition is called instead.
     const pool = makePoolInfo({ currentTickIndex: 500 });
     const pos = makePosition({ liquidity: '0' });
-    // Manually force the position into the pool-positions filter by overriding
-    // the getPositions to return a position with non-zero liquidity first,
-    // then checking the stored-liquidity guard path.
-    // Actually, zero-liquidity positions are filtered out in checkAndRebalance,
-    // so to test the guard path directly we bypass the filter by giving it a
-    // realistic positive value and testing the guard inside rebalancePosition
-    // by calling it through a position where liquidity is cleared after filtering.
-
-    // The simplest approach: mock getPositions to return liquidity='0' via the filter workaround —
-    // the filter uses BigInt(p.liquidity) > 0n, so '0' is filtered out and null is returned.
     const monitor = makeMonitor([pos], pool);
     const config = { gasBudget: 50_000_000, maxSlippage: 0.01, lowerTick: 400, upperTick: 600 } as any;
 
     const svc = new RebalanceService(makeSdkService(), monitor, config);
-    // Because liquidity is '0', checkAndRebalance returns null (position filtered out).
     const result = await svc.checkAndRebalance('0xpool');
-    expect(result).toBeNull();
+
+    // Instead of null, a new initial position is created.
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    expect(result!.newPosition).toEqual({ tickLower: 400, tickUpper: 600 });
   });
 });
 

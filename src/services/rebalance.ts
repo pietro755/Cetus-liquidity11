@@ -86,8 +86,8 @@ export class RebalanceService {
       });
 
       if (poolPositions.length === 0) {
-        logger.info('No positions with liquidity found in pool');
-        return null;
+        logger.info('No positions with liquidity found in pool — creating initial position');
+        return this.createInitialPosition(poolInfo);
       }
 
       // Highest liquidity position
@@ -127,6 +127,95 @@ export class RebalanceService {
     } catch (error) {
       logger.error('checkAndRebalance failed', error);
       throw error;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private: create initial position (no existing position to close)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Called when no position with liquidity is found in the pool.
+   * Determines a tick range, reads wallet balances, swaps if needed,
+   * and opens a brand-new position.
+   */
+  private async createInitialPosition(poolInfo: PoolInfo): Promise<RebalanceResult> {
+    try {
+      // Determine tick range: use explicit env vars if set, otherwise default to
+      // ±10 tick spacings centred on the current tick (aligned to tickSpacing).
+      let lower: number;
+      let upper: number;
+
+      if (this.config.lowerTick !== undefined && this.config.upperTick !== undefined) {
+        lower = this.config.lowerTick;
+        upper = this.config.upperTick;
+        logger.info('Using env-configured tick range for initial position', { lower, upper });
+      } else {
+        const tickSpacing = poolInfo.tickSpacing;
+        const halfWidth = 10 * tickSpacing;
+        lower = Math.floor((poolInfo.currentTickIndex - halfWidth) / tickSpacing) * tickSpacing;
+        upper = Math.floor((poolInfo.currentTickIndex + halfWidth) / tickSpacing) * tickSpacing;
+        logger.info('Using default tick range (±10 tick spacings) for initial position', {
+          lower,
+          upper,
+          currentTick: poolInfo.currentTickIndex,
+          tickSpacing,
+        });
+      }
+
+      if (this.dryRun) {
+        logger.info('[DRY RUN] Would create initial position', {
+          tickRange: { lower, upper },
+        });
+        return {
+          success: true,
+          newPosition: { tickLower: lower, tickUpper: upper },
+        };
+      }
+
+      // Read wallet balances.
+      const balances = await this.getWalletBalances(poolInfo.coinTypeA, poolInfo.coinTypeB);
+      logger.info('Wallet balances for initial position', {
+        amountA: balances.amountA,
+        amountB: balances.amountB,
+        coinTypeA: poolInfo.coinTypeA,
+        coinTypeB: poolInfo.coinTypeB,
+      });
+
+      // Swap to correct token ratio if needed.
+      const adjusted = await this.swapTokensIfNeeded(
+        balances.amountA,
+        balances.amountB,
+        poolInfo,
+        lower,
+        upper,
+      );
+
+      // Open the new position.
+      const result = await this.openNewPosition(
+        poolInfo,
+        lower,
+        upper,
+        adjusted.amountA,
+        adjusted.amountB,
+      );
+
+      logger.info('Initial position created', {
+        newRange: { lower, upper },
+        transactionDigest: result.transactionDigest,
+      });
+
+      return {
+        success: true,
+        transactionDigest: result.transactionDigest,
+        newPosition: { tickLower: lower, tickUpper: upper },
+      };
+    } catch (error) {
+      logger.error('createInitialPosition failed', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
     }
   }
 
@@ -577,7 +666,7 @@ export class RebalanceService {
     tickUpper: number,
     amountA: string,
     amountB: string,
-    storedLiquidity: string,
+    storedLiquidity?: string,
   ): Promise<{ transactionDigest?: string }> {
     // Validate that amountA and amountB are valid non-negative integer strings.
     const isValidAmountString = (v: string) => /^\d+$/.test(v);
@@ -592,7 +681,8 @@ export class RebalanceService {
       throw new Error('No token amounts available to open new position');
     }
 
-    if (!storedLiquidity || BigInt(storedLiquidity) === 0n) {
+    // Only validate stored liquidity when it is explicitly provided (rebalance path).
+    if (storedLiquidity !== undefined && (!storedLiquidity || BigInt(storedLiquidity) === 0n)) {
       throw new Error('Stored liquidity value is zero — cannot open new position');
     }
 

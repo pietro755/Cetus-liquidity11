@@ -532,9 +532,44 @@ export class RebalanceService {
         logger.info('Both tokens available — no swap needed');
         return { amountA, amountB };
       }
-      // One token is zero — swap half of the available token to obtain both.
-      if (bigA > 0n) { a2b = true; swapAmount = bigA / 2n; }
-      else { a2b = false; swapAmount = bigB / 2n; }
+      // One token is zero — compute the CLMM-optimal swap amount so the
+      // resulting token ratio exactly matches what the target tick range
+      // requires at the current price.  Swapping an arbitrary "half" of the
+      // available token leaves the wrong ratio for asymmetric ranges, causing
+      // the non-bottleneck token to be partially unused and the new position's
+      // delta_liquidity to fall short of the closed position's liquidity.
+      //
+      // Derivation (first-order, ignoring price impact and fees):
+      //   Let sqrtP, sqrtPa, sqrtPb be Q64.64 sqrt prices.
+      //   Required ratio: reqA/reqB = (sqrtPb−sqrtP)·2^128 /
+      //                               (sqrtP·sqrtPb·(sqrtP−sqrtPa))
+      //
+      //   Shared denominator: D = sqrtPb·(sqrtP−sqrtPa) + sqrtP·(sqrtPb−sqrtP)
+      //
+      //   A→B optimal swap: amount = bigA · sqrtPb · (sqrtP−sqrtPa) / D
+      //   B→A optimal swap: amount = bigB · sqrtP  · (sqrtPb−sqrtP) / D
+      //
+      // Falls back to the half-swap heuristic if the denominator is zero (e.g.
+      // degenerate range) or the sqrt price is inconsistent with the tick bounds.
+      const sqrtPBig    = BigInt(poolInfo.currentSqrtPrice);
+      const sqrtPaCalc  = BigInt(TickMath.tickIndexToSqrtPriceX64(tickLower).toString());
+      const sqrtPbCalc  = BigInt(TickMath.tickIndexToSqrtPriceX64(tickUpper).toString());
+
+      const denominator =
+        sqrtPbCalc * (sqrtPBig - sqrtPaCalc) +
+        sqrtPBig   * (sqrtPbCalc - sqrtPBig);
+
+      if (sqrtPBig <= sqrtPaCalc || sqrtPBig >= sqrtPbCalc || denominator <= 0n) {
+        // Degenerate / inconsistent data — fall back to the half heuristic.
+        if (bigA > 0n) { a2b = true;  swapAmount = bigA / 2n; }
+        else            { a2b = false; swapAmount = bigB / 2n; }
+      } else if (bigA > 0n) {
+        a2b = true;
+        swapAmount = bigA * sqrtPbCalc * (sqrtPBig - sqrtPaCalc) / denominator;
+      } else {
+        a2b = false;
+        swapAmount = bigB * sqrtPBig * (sqrtPbCalc - sqrtPBig) / denominator;
+      }
       if (swapAmount === 0n) return { amountA, amountB };
     }
 

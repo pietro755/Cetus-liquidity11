@@ -1188,6 +1188,234 @@ describe('rebalance – both tokens present with out-of-range new position trigg
 });
 
 // ---------------------------------------------------------------------------
+// swapTokensIfNeeded — CLMM-optimal swap when in-range with a single token
+// ---------------------------------------------------------------------------
+
+describe('rebalance – CLMM-optimal swap amount for in-range single-token case', () => {
+  afterEach(() => { delete process.env.DRY_RUN; });
+
+  /**
+   * Run a full rebalance where only ONE token is available after closing the
+   * old position and the new tick range is in-range.  Returns the direction
+   * and amount passed to the swap call.
+   */
+  async function runAndCaptureSingleTokenSwap(
+    currentTickIndex: number,
+    currentSqrtPrice: string,
+    tickLower: number,
+    tickUpper: number,
+    balanceA: string,
+    balanceB: string,
+  ): Promise<{ a2b: boolean; amount: string }> {
+    process.env.DRY_RUN = 'false';
+
+    const pool = {
+      poolAddress: '0xpool',
+      currentTickIndex,
+      currentSqrtPrice,
+      coinTypeA: '0xcoinA',
+      coinTypeB: '0xcoinB',
+      tickSpacing: 10,
+    };
+
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool as any);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: tickLower,
+      upperTick: tickUpper,
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createSwapTransactionPayload = jest.fn().mockReturnValue(mockTxStub);
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+
+    const mockSdk = {
+      RouterV2: {
+        getBestRouter: jest.fn().mockRejectedValue(new Error('aggregator unavailable')),
+      },
+      Swap: {
+        createSwapTransactionPayload,
+      },
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    let getBalanceCallCount = 0;
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        // removeLiquidity
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        // swap (fallback direct)
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xswap',
+          balanceChanges: [],
+        })
+        // openPosition NFT
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        // addLiquidity
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 2) return Promise.resolve({ totalBalance: '0' });
+        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? balanceA : balanceB });
+      }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    expect(createSwapTransactionPayload).toHaveBeenCalledTimes(1);
+
+    const swapArgs = createSwapTransactionPayload.mock.calls[0][0] as { a2b: boolean; amount: string };
+    return { a2b: swapArgs.a2b, amount: swapArgs.amount };
+  }
+
+  // Tick 500 sqrt price for the in-range scenario tests below.
+  const SQRT_PRICE_TICK_500 = '18913701982652573318';
+
+  it('swaps A→B with CLMM-optimal amount when only token A is available and price is in range', async () => {
+    // Only token A is available (token B is 0) after closing a below-range position.
+    // The new range [400, 600] is in range at tick 500.
+    //
+    // With the old "swap half" heuristic, the bot would swap bigA/2 = 500_000.
+    // With the CLMM-optimal formula the swap amount depends on the exact ratio
+    // required by [tick400, tick600] at tick500.  The precise value is computed
+    // by the formula: bigA * sqrtPb * (sqrtP - sqrtPa) / D, which for a roughly
+    // symmetric range around tick 500 should be close to but NOT exactly half.
+    const swap = await runAndCaptureSingleTokenSwap(
+      500,                  // currentTick — in the new range [400, 600]
+      SQRT_PRICE_TICK_500,
+      400,                  // tickLower
+      600,                  // tickUpper
+      '1000000',            // balanceA — all available in token A
+      '0',                  // balanceB — none
+    );
+
+    expect(swap.a2b).toBe(true);   // A → B direction is correct
+
+    // The CLMM-optimal swap amount must be a positive integer string.
+    const swapAmt = BigInt(swap.amount);
+    expect(swapAmt).toBeGreaterThan(0n);
+    expect(swapAmt).toBeLessThan(1_000_000n); // must not swap more than available
+
+    // The optimal amount for a roughly symmetric ±100-tick range around tick 500
+    // is approximately 50% of bigA (within ±5% of 500_000 for near-symmetric ranges).
+    // The exact value is NOT 500_000 in general, and varies by tick geometry.
+    expect(swapAmt).toBeGreaterThanOrEqual(400_000n);
+    expect(swapAmt).toBeLessThanOrEqual(600_000n);
+  });
+
+  it('swaps B→A with CLMM-optimal amount when only token B is available and price is in range', async () => {
+    // Only token B is available (token A is 0) after closing an above-range position.
+    // The new range [400, 600] is in range at tick 500.
+    const swap = await runAndCaptureSingleTokenSwap(
+      500,
+      SQRT_PRICE_TICK_500,
+      400,
+      600,
+      '0',                  // balanceA — none
+      '1000000',            // balanceB — all available in token B
+    );
+
+    expect(swap.a2b).toBe(false);  // B → A direction is correct
+
+    const swapAmt = BigInt(swap.amount);
+    expect(swapAmt).toBeGreaterThan(0n);
+    expect(swapAmt).toBeLessThan(1_000_000n);
+
+    // Similar symmetry argument — should be near but not exactly half.
+    expect(swapAmt).toBeGreaterThanOrEqual(400_000n);
+    expect(swapAmt).toBeLessThanOrEqual(600_000n);
+  });
+
+  it('swaps a smaller A fraction when the new range is skewed toward A (near lower tick)', async () => {
+    // New range [490, 600]: tick 500 is only 10 ticks above tickLower (490)
+    // and 100 ticks below tickUpper (600).
+    //
+    // CLMM position amounts at tick 500 in [490, 600]:
+    //   amountA ∝ (sqrtPb − sqrtP): 100 ticks of "A headroom" → large A component
+    //   amountB ∝ (sqrtP − sqrtPa): 10 ticks of "B headroom"  → small  B component
+    //
+    // So the position needs MOSTLY A and only a tiny bit of B.
+    // When only A is available, the bot must swap a SMALL fraction of A to B
+    // (~9–10%) — much less than the "swap half" heuristic's 50%.
+    const swap = await runAndCaptureSingleTokenSwap(
+      500,
+      SQRT_PRICE_TICK_500,
+      490,    // tickLower — close to current tick (small B-accepting portion)
+      600,    // tickUpper — far above current tick (large A-accepting portion)
+      '1000000',
+      '0',
+    );
+
+    expect(swap.a2b).toBe(true); // A → B
+
+    // The optimal swap is significantly LESS than half because the position
+    // needs mostly A.  The naive half-swap would leave far too much B and
+    // too little A, reducing achieved liquidity.
+    const swapAmt = BigInt(swap.amount);
+    expect(swapAmt).toBeGreaterThan(0n);
+    expect(swapAmt).toBeLessThan(500_000n); // strictly less than the "half" heuristic
+  });
+
+  it('swaps a smaller B fraction when the new range is skewed toward B (near upper tick)', async () => {
+    // New range [400, 510]: tick 500 is 100 ticks above tickLower (400)
+    // and only 10 ticks below tickUpper (510).
+    //
+    // CLMM position amounts at tick 500 in [400, 510]:
+    //   amountA ∝ (sqrtPb − sqrtP): 10 ticks of "A headroom"  → small  A component
+    //   amountB ∝ (sqrtP − sqrtPa): 100 ticks of "B headroom" → large  B component
+    //
+    // So the position needs MOSTLY B and only a tiny bit of A.
+    // When only B is available, the bot must swap a SMALL fraction of B to A
+    // (~9–10%) — much less than the "swap half" heuristic's 50%.
+    const swap = await runAndCaptureSingleTokenSwap(
+      500,
+      SQRT_PRICE_TICK_500,
+      400,    // tickLower — far below current tick
+      510,    // tickUpper — close to current tick (small A-accepting portion)
+      '0',
+      '1000000',
+    );
+
+    expect(swap.a2b).toBe(false); // B → A
+
+    // The optimal swap is significantly LESS than half because the position
+    // needs mostly B.
+    const swapAmt = BigInt(swap.amount);
+    expect(swapAmt).toBeGreaterThan(0n);
+    expect(swapAmt).toBeLessThan(500_000n); // strictly less than the "half" heuristic
+  });
+});
+
+// ---------------------------------------------------------------------------
 // SUI gas reservation in getWalletBalances
 // ---------------------------------------------------------------------------
 

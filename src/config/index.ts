@@ -15,6 +15,7 @@ export interface BotConfig {
   poolAddress: string;
   lowerTick?: number;
   upperTick?: number;
+  rangeWidth?: number;
 
   // Token amounts for zap-in
   tokenAAmount?: string;
@@ -72,6 +73,7 @@ export function loadConfig(): BotConfig {
     poolAddress: getEnvVar('POOL_ADDRESS'),
     lowerTick: getEnvVar('LOWER_TICK', false) ? parseInt(getEnvVar('LOWER_TICK', false)) : undefined,
     upperTick: getEnvVar('UPPER_TICK', false) ? parseInt(getEnvVar('UPPER_TICK', false)) : undefined,
+    rangeWidth: getEnvVar('RANGE_WIDTH', false) ? parseInt(getEnvVar('RANGE_WIDTH', false)) : undefined,
     tokenAAmount: getEnvVar('TOKEN_A_AMOUNT', false) || undefined,
     tokenBAmount: getEnvVar('TOKEN_B_AMOUNT', false) || undefined,
     maxSlippage,

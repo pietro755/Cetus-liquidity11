@@ -132,6 +132,20 @@ describe('loadConfig – optional numeric & boolean variables', () => {
     expect(cfg.lowerTick).toBeUndefined();
     expect(cfg.upperTick).toBeUndefined();
   });
+
+  it('parses RANGE_WIDTH when set', () => {
+    process.env.RANGE_WIDTH = '400';
+    const { loadConfig } = loadFresh();
+    const cfg = loadConfig();
+    expect(cfg.rangeWidth).toBe(400);
+  });
+
+  it('leaves rangeWidth undefined when RANGE_WIDTH is not set', () => {
+    delete process.env.RANGE_WIDTH;
+    const { loadConfig } = loadFresh();
+    const cfg = loadConfig();
+    expect(cfg.rangeWidth).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

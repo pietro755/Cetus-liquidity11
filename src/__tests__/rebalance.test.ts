@@ -1701,3 +1701,117 @@ describe('rebalance – only close_position amounts used for swap and new positi
     expect(callArgs.amount_b).toBe('3000000');
   });
 });
+
+// ---------------------------------------------------------------------------
+// RANGE_WIDTH env var — rebalancePosition (out-of-range, dry-run)
+// ---------------------------------------------------------------------------
+
+describe('checkAndRebalance – dry-run out-of-range, RANGE_WIDTH tick range', () => {
+  beforeEach(() => { process.env.DRY_RUN = 'true'; });
+  afterEach(() => { delete process.env.DRY_RUN; });
+
+  it('uses rangeWidth from config when lowerTick/upperTick are not set', async () => {
+    const pool = makePoolInfo({ currentTickIndex: 2000, tickSpacing: 10 });
+    const pos = makePosition({ tickLower: -500, tickUpper: 500, liquidity: '2000000' });
+    const monitor = makeMonitor([pos], pool);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      rangeWidth: 400,  // RANGE_WIDTH=400 — should use this, not old position width
+    } as any;
+
+    const svc = new RebalanceService(makeSdkService(), monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    const { tickLower, tickUpper } = result!.newPosition!;
+
+    // Both bounds must be multiples of tickSpacing (10)
+    expect(tickLower % 10).toBe(0);
+    expect(tickUpper % 10).toBe(0);
+    // Range must straddle the current tick
+    expect(tickLower).toBeLessThanOrEqual(2000);
+    expect(tickUpper).toBeGreaterThanOrEqual(2000);
+    // Width must be approximately the configured rangeWidth (may be rounded up to tickSpacing)
+    expect(tickUpper - tickLower).toBeGreaterThanOrEqual(400);
+  });
+
+  it('prefers explicit lowerTick/upperTick over rangeWidth', async () => {
+    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '1000000' });
+    const monitor = makeMonitor([pos], pool);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      rangeWidth: 9999,  // should be ignored because lowerTick/upperTick are set
+    } as any;
+
+    const svc = new RebalanceService(makeSdkService(), monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result!.newPosition).toEqual({ tickLower: 400, tickUpper: 600 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RANGE_WIDTH env var — createInitialPosition (no existing position, dry-run)
+// ---------------------------------------------------------------------------
+
+describe('checkAndRebalance – no positions, RANGE_WIDTH tick range', () => {
+  beforeEach(() => { process.env.DRY_RUN = 'true'; });
+  afterEach(() => { delete process.env.DRY_RUN; });
+
+  it('uses rangeWidth from config for initial position when lowerTick/upperTick are not set', async () => {
+    const pool = makePoolInfo({ currentTickIndex: 1000, tickSpacing: 10 });
+    const monitor = makeMonitor([], pool);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      rangeWidth: 200,  // RANGE_WIDTH=200
+    } as any;
+
+    const svc = new RebalanceService(makeSdkService(), monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    const { tickLower, tickUpper } = result!.newPosition!;
+
+    // Both bounds must be multiples of tickSpacing (10)
+    expect(tickLower % 10).toBe(0);
+    expect(tickUpper % 10).toBe(0);
+    // Range must straddle the current tick
+    expect(tickLower).toBeLessThanOrEqual(1000);
+    expect(tickUpper).toBeGreaterThanOrEqual(1000);
+    // Width must be approximately rangeWidth (may be rounded up to tickSpacing)
+    expect(tickUpper - tickLower).toBeGreaterThanOrEqual(200);
+  });
+
+  it('prefers explicit lowerTick/upperTick over rangeWidth for initial position', async () => {
+    const pool = makePoolInfo({ currentTickIndex: 1000, tickSpacing: 10 });
+    const monitor = makeMonitor([], pool);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 900,
+      upperTick: 1100,
+      rangeWidth: 9999,  // should be ignored
+    } as any;
+
+    const svc = new RebalanceService(makeSdkService(), monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result!.newPosition).toEqual({ tickLower: 900, tickUpper: 1100 });
+  });
+});

@@ -150,6 +150,19 @@ export class RebalanceService {
         lower = this.config.lowerTick;
         upper = this.config.upperTick;
         logger.info('Using env-configured tick range for initial position', { lower, upper });
+      } else if (this.config.rangeWidth !== undefined) {
+        ({ lower, upper } = this.computeRangeFromWidth(
+          poolInfo.currentTickIndex,
+          this.config.rangeWidth,
+          poolInfo.tickSpacing,
+        ));
+        logger.info('Using RANGE_WIDTH env tick range for initial position', {
+          lower,
+          upper,
+          rangeWidth: this.config.rangeWidth,
+          currentTick: poolInfo.currentTickIndex,
+          tickSpacing: poolInfo.tickSpacing,
+        });
       } else {
         const tickSpacing = poolInfo.tickSpacing;
         const halfWidth = 10 * tickSpacing;
@@ -237,15 +250,27 @@ export class RebalanceService {
         lower = this.config.lowerTick;
         upper = this.config.upperTick;
         logger.info('Using env-configured tick range', { lower, upper });
+      } else if (this.config.rangeWidth !== undefined) {
+        ({ lower, upper } = this.computeRangeFromWidth(
+          poolInfo.currentTickIndex,
+          this.config.rangeWidth,
+          poolInfo.tickSpacing,
+        ));
+        logger.info('Using RANGE_WIDTH env tick range', {
+          lower,
+          upper,
+          rangeWidth: this.config.rangeWidth,
+        });
       } else {
         // Preserve the width of the old position, centred on the current tick.
         // Both bounds are independently aligned to tickSpacing to ensure the
         // Cetus SDK accepts them as valid tick indices.
         const rangeWidth = position.tickUpper - position.tickLower;
-        const tickSpacing = poolInfo.tickSpacing;
-        const half = Math.floor(rangeWidth / 2);
-        lower = Math.floor((poolInfo.currentTickIndex - half) / tickSpacing) * tickSpacing;
-        upper = Math.ceil((poolInfo.currentTickIndex + half) / tickSpacing) * tickSpacing;
+        ({ lower, upper } = this.computeRangeFromWidth(
+          poolInfo.currentTickIndex,
+          rangeWidth,
+          poolInfo.tickSpacing,
+        ));
         logger.info('Calculated new tick range (preserving width)', { lower, upper, rangeWidth });
       }
 
@@ -361,6 +386,30 @@ export class RebalanceService {
         error: error instanceof Error ? error.message : 'Unknown error',
       };
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private: compute new tick range centred on current tick
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Returns lower/upper tick bounds for a new position centred on the current
+   * tick, with both bounds snapped to tickSpacing.
+   *
+   * @param currentTick  The pool's current tick index.
+   * @param rangeWidth   Total width in ticks (actual width may be slightly
+   *                     larger after alignment to tickSpacing).
+   * @param tickSpacing  Pool tick spacing.
+   */
+  private computeRangeFromWidth(
+    currentTick: number,
+    rangeWidth: number,
+    tickSpacing: number,
+  ): { lower: number; upper: number } {
+    const half = Math.floor(rangeWidth / 2);
+    const lower = Math.floor((currentTick - half) / tickSpacing) * tickSpacing;
+    const upper = Math.ceil((currentTick + half) / tickSpacing) * tickSpacing;
+    return { lower, upper };
   }
 
   // ---------------------------------------------------------------------------

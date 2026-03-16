@@ -700,12 +700,14 @@ export class RebalanceService {
 
   /**
    * Open a new position using an explicit two-step approach:
-   *   1. openPositionTransactionPayload  → creates the position NFT
-   *   2. createAddLiquidityPayload       → deposits tokens using the stored delta_liquidity
+   *   1. openPositionTransactionPayload        → creates the position NFT
+   *   2. createAddLiquidityFixTokenPayload     → deposits only the tokens received
+   *                                              from the removed position
    *
-   * The delta_liquidity is the exact value stored from the closed position — it is
-   * never recomputed from token amounts.  The wallet balances (amountA / amountB)
-   * act as max_amount_a / max_amount_b, ensuring the bot never pulls extra funds.
+   * The token amounts (amountA / amountB) are the pre/post balance deltas computed
+   * in rebalancePosition — they represent exactly what was received when the old
+   * position was closed, never the full wallet balance.  The SDK derives the correct
+   * delta_liquidity from these amounts for the new tick range.
    */
   private async openNewPosition(
     poolInfo: PoolInfo,
@@ -805,11 +807,12 @@ export class RebalanceService {
     await this.waitForPositionObject(suiClient, newPositionId);
 
     // -----------------------------------------------------------------------
-    // Step 2: Add liquidity using the actual wallet token amounts.
-    //   createAddLiquidityFixTokenPayload derives the correct delta_liquidity
-    //   from the available token amounts for the new tick range and current
-    //   price, ensuring the wallet is never overdrawn regardless of what the
-    //   old position's stored liquidity value was.
+    // Step 2: Add liquidity using only the received token amounts.
+    //   amountA / amountB are the pre/post balance deltas from rebalancePosition
+    //   — they represent exactly what was received when the old position was
+    //   closed, not the full wallet balance.  createAddLiquidityFixTokenPayload
+    //   derives the correct delta_liquidity from these amounts for the new tick
+    //   range, so the bot never deposits more than it received from removal.
     // -----------------------------------------------------------------------
     const bigAmtA = BigInt(amountA || '0');
     const bigAmtB = BigInt(amountB || '0');

@@ -367,6 +367,18 @@ export class RebalanceService {
         storedLiquidity,
       );
 
+      // Step 5: If the new position's liquidity is below the target (storedLiquidity),
+      // add more liquidity from remaining wallet funds to reach the close_position amount.
+      if (result.positionId) {
+        await this.topUpLiquidityIfNeeded(
+          result.positionId,
+          storedLiquidity,
+          poolInfo,
+          lower,
+          upper,
+        );
+      }
+
       logger.info('Rebalance completed', {
         oldRange: { lower: position.tickLower, upper: position.tickUpper },
         newRange: { lower, upper },
@@ -808,7 +820,7 @@ export class RebalanceService {
     amountA: string,
     amountB: string,
     storedLiquidity?: string,
-  ): Promise<{ transactionDigest?: string }> {
+  ): Promise<{ transactionDigest?: string; positionId?: string }> {
     // Validate that amountA and amountB are valid non-negative integer strings.
     const isValidAmountString = (v: string) => /^\d+$/.test(v);
     if (!isValidAmountString(amountA)) {
@@ -926,53 +938,8 @@ export class RebalanceService {
     //                                                      i.e. the one that yields
     //                                                      the smaller delta_liquidity.
     //
-    // Correct CLMM liquidity-bottleneck comparison (all sqrt prices in Q64):
-    //   L_a = amountA × P × Pb / ((Pb − P) × 2^64)
-    //   L_b = amountB × 2^64 / (P − Pa)
-    //   fix A when L_a ≤ L_b
-    //     ↔  amountA × P × Pb × (P − Pa) ≤ amountB × 2^128 × (Pb − P)
-    //
-    // where Pa = sqrtPrice(tickLower) and Pb = sqrtPrice(tickUpper) are obtained
-    // from TickMath so the comparison correctly accounts for the tick-range shape.
-    // The old approximation (amountA × P² ≤ amountB × 2^128) only holds when the
-    // range is symmetric around the geometric mean, and diverges enough near either
-    // bound to cause InsufficientCoinBalance for the non-fixed token.
-    let fix_amount_a: boolean;
-    const currentTick = poolInfo.currentTickIndex;
-    if (bigAmtA === 0n) {
-      fix_amount_a = false; // Only B available
-    } else if (bigAmtB === 0n) {
-      fix_amount_a = true;  // Only A available
-    } else if (currentTick < tickLower) {
-      // Price is below range — the position only accepts token A.
-      fix_amount_a = true;
-    } else if (currentTick >= tickUpper) {
-      // Price is above range — the position only accepts token B.
-      fix_amount_a = false;
-    } else {
-      // Price is in range — determine the liquidity bottleneck using the
-      // correct CLMM formula so the SDK never computes a required amount
-      // that exceeds our available balance.
-      const sqrtPriceBig    = BigInt(poolInfo.currentSqrtPrice);
-      const sqrtPriceLower  = BigInt(TickMath.tickIndexToSqrtPriceX64(tickLower).toString());
-      const sqrtPriceUpper  = BigInt(TickMath.tickIndexToSqrtPriceX64(tickUpper).toString());
-      const TWO_128 = 2n ** 128n;
-
-      // Guard: if currentSqrtPrice is inconsistent with the tick-index checks
-      // above (e.g. data from a lagging RPC node or synthetic test data), the
-      // subtraction (sqrtPriceBig − sqrtPriceLower) could underflow.  Apply the
-      // conservative single-token direction based on where the sqrt price falls
-      // relative to the computed tick-bound sqrt prices.
-      if (sqrtPriceBig <= sqrtPriceLower) {
-        fix_amount_a = true;
-      } else if (sqrtPriceBig >= sqrtPriceUpper) {
-        fix_amount_a = false;
-      } else {
-        fix_amount_a =
-          bigAmtA * sqrtPriceBig * sqrtPriceUpper * (sqrtPriceBig - sqrtPriceLower) <=
-          bigAmtB * TWO_128 * (sqrtPriceUpper - sqrtPriceBig);
-      }
-    }
+    // See determineFixAmountA() for the exact CLMM comparison used.
+    const fix_amount_a = this.determineFixAmountA(bigAmtA, bigAmtB, poolInfo, tickLower, tickUpper);
 
     logger.info('Opening new position — step 2: deposit tokens', {
       positionId: newPositionId,
@@ -1040,7 +1007,145 @@ export class RebalanceService {
       throw new Error('Add liquidity did not return a transaction digest');
     }
 
-    return { transactionDigest: addDigest };
+    return { transactionDigest: addDigest, positionId: newPositionId };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private: top up position liquidity to match the closed position's amount
+  // ---------------------------------------------------------------------------
+
+  /**
+   * After opening a new position, verify its on-chain liquidity equals
+   * `targetLiquidity` (the liquidity of the closed position).  When the actual
+   * liquidity is lower — due to swap fees, price impact, or rounding —
+   * the remaining wallet funds (leftover tokens not fully consumed by the
+   * initial add-liquidity call) are deposited to close the gap.
+   *
+   * Early returns (all treated as non-fatal):
+   *   • Position not found on-chain    → logs a warning and returns.
+   *   • Liquidity already meets target → logs info and returns.
+   *   • No wallet funds remain         → logs a warning and returns.
+   *
+   * In all early-return cases the rebalance result is still reported as
+   * successful because the new position is already open and operational.
+   */
+  private async topUpLiquidityIfNeeded(
+    positionId: string,
+    targetLiquidity: string,
+    poolInfo: PoolInfo,
+    tickLower: number,
+    tickUpper: number,
+  ): Promise<void> {
+    // Fetch the new position's current on-chain liquidity.
+    const ownerAddress = this.sdkService.getAddress();
+    const allPositions = await this.monitorService.getPositions(ownerAddress);
+    const position = allPositions.find(p => p.positionId === positionId);
+
+    if (!position) {
+      logger.warn('Could not find new position to verify liquidity', { positionId });
+      return;
+    }
+
+    const currentLiquidity = BigInt(position.liquidity || '0');
+    const target = BigInt(targetLiquidity);
+
+    if (currentLiquidity >= target) {
+      logger.info('New position liquidity meets or exceeds target — no top-up needed', {
+        positionId,
+        currentLiquidity: currentLiquidity.toString(),
+        targetLiquidity,
+      });
+      return;
+    }
+
+    const deficit = target - currentLiquidity;
+    logger.info('New position liquidity is below target — adding top-up liquidity', {
+      positionId,
+      currentLiquidity: currentLiquidity.toString(),
+      targetLiquidity,
+      // The deficit is the liquidity gap to close.  The actual top-up amount is
+      // determined by the remaining wallet funds, not by this value directly.
+      deficit: deficit.toString(),
+    });
+
+    // Fetch remaining wallet balances (leftover tokens from the removal/swap that
+    // were not fully consumed by the initial add-liquidity call).
+    const balances = await this.getWalletBalances(poolInfo.coinTypeA, poolInfo.coinTypeB);
+
+    if (BigInt(balances.amountA) === 0n && BigInt(balances.amountB) === 0n) {
+      logger.warn('No wallet funds available for liquidity top-up', {
+        positionId,
+        deficit: deficit.toString(),
+      });
+      return;
+    }
+
+    // Determine which token to fix for the top-up add-liquidity call using the
+    // shared bottleneck helper (same logic as the initial openNewPosition deposit).
+    const bigAmtA = BigInt(balances.amountA);
+    const bigAmtB = BigInt(balances.amountB);
+    const fix_amount_a = this.determineFixAmountA(bigAmtA, bigAmtB, poolInfo, tickLower, tickUpper);
+
+    logger.info('Adding top-up liquidity to new position', {
+      positionId,
+      amountA: balances.amountA,
+      amountB: balances.amountB,
+      fix_amount_a,
+    });
+
+    const sdk = this.sdkService.getSdk();
+    const keypair = this.sdkService.getKeypair();
+    const suiClient = this.sdkService.getSuiClient();
+
+    await this.retryTransaction(
+      async () => {
+        const addLiquidityParams: AddLiquidityFixTokenParams = {
+          pool_id: poolInfo.poolAddress,
+          pos_id: positionId,
+          coinTypeA: poolInfo.coinTypeA,
+          coinTypeB: poolInfo.coinTypeB,
+          amount_a: balances.amountA,
+          amount_b: balances.amountB,
+          fix_amount_a,
+          slippage: this.config.maxSlippage,
+          is_open: false,
+          tick_lower: String(tickLower),
+          tick_upper: String(tickUpper),
+          collect_fee: false,
+          rewarder_coin_types: [],
+        };
+
+        let topUpTx;
+        try {
+          topUpTx = await sdk.Position.createAddLiquidityFixTokenPayload(addLiquidityParams);
+        } catch (sdkErr) {
+          logger.error('Top-up createAddLiquidityFixTokenPayload failed', {
+            error: sdkErr instanceof Error ? sdkErr.message : String(sdkErr),
+            params: addLiquidityParams,
+          });
+          throw sdkErr;
+        }
+        topUpTx.setGasBudget(this.config.gasBudget);
+
+        const topUpResult = await suiClient.signAndExecuteTransaction({
+          transaction: topUpTx,
+          signer: keypair,
+          options: { showEffects: true },
+        });
+
+        if (topUpResult.effects?.status?.status !== 'success') {
+          throw new Error(`Top-up liquidity failed: ${topUpResult.effects?.status?.error || 'Unknown'}`);
+        }
+
+        logger.info('Top-up liquidity transaction succeeded', {
+          positionId,
+          digest: topUpResult.digest,
+        });
+      },
+      'top-up liquidity',
+      3,
+      2000,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -1147,6 +1252,65 @@ export class RebalanceService {
     }
 
     throw lastError || new Error(`All retries failed for ${operationName}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private: determine which token to fix for createAddLiquidityFixTokenPayload
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Determine which token to fix for `createAddLiquidityFixTokenPayload`.
+   *
+   * The SDK derives `delta_liquidity` from the fixed token's amount, then
+   * computes how much of the other token is needed.  If that computed amount
+   * exceeds the available balance the transaction fails.  This method selects
+   * the token that is the liquidity bottleneck so the SDK's computed requirement
+   * for the non-fixed token never exceeds our available balance.
+   *
+   * Strategy:
+   *   • Price below range  (currentTick < tickLower)  → only token A accepted; fix A.
+   *   • Price above range  (currentTick >= tickUpper) → only token B accepted; fix B.
+   *   • Price in range                                → fix the bottleneck token, i.e.
+   *                                                     the one yielding the smaller
+   *                                                     delta_liquidity.
+   *
+   * CLMM bottleneck comparison (all sqrt prices in Q64.64):
+   *   fix A when L_a ≤ L_b
+   *     ↔  amountA × P × Pb × (P − Pa) ≤ amountB × 2^128 × (Pb − P)
+   */
+  private determineFixAmountA(
+    amountA: bigint,
+    amountB: bigint,
+    poolInfo: PoolInfo,
+    tickLower: number,
+    tickUpper: number,
+  ): boolean {
+    if (amountA === 0n) return false; // Only B available
+    if (amountB === 0n) return true;  // Only A available
+
+    const currentTick = poolInfo.currentTickIndex;
+    if (currentTick < tickLower) return true;  // below range — only A accepted
+    if (currentTick >= tickUpper) return false; // above range — only B accepted
+
+    // Price is in range — determine the bottleneck using the correct CLMM formula
+    // so the SDK never computes a required amount exceeding our available balance.
+    const sqrtPriceBig   = BigInt(poolInfo.currentSqrtPrice);
+    const sqrtPriceLower = BigInt(TickMath.tickIndexToSqrtPriceX64(tickLower).toString());
+    const sqrtPriceUpper = BigInt(TickMath.tickIndexToSqrtPriceX64(tickUpper).toString());
+    const TWO_128 = 2n ** 128n;
+
+    // Guard: if currentSqrtPrice is inconsistent with the tick-index checks
+    // above (e.g. data from a lagging RPC node or synthetic test data), the
+    // subtraction (sqrtPriceBig − sqrtPriceLower) could underflow.  Apply the
+    // conservative single-token direction based on where the sqrt price falls
+    // relative to the computed tick-bound sqrt prices.
+    if (sqrtPriceBig <= sqrtPriceLower) return true;
+    if (sqrtPriceBig >= sqrtPriceUpper) return false;
+
+    return (
+      amountA * sqrtPriceBig * sqrtPriceUpper * (sqrtPriceBig - sqrtPriceLower) <=
+      amountB * TWO_128 * (sqrtPriceUpper - sqrtPriceBig)
+    );
   }
 
   /** Normalise coin type for comparison (lowercased, leading zeros stripped). */

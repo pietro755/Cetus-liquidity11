@@ -341,6 +341,10 @@ describe('rebalance – live path uses fix-token add-liquidity', () => {
       },
     };
 
+    // getBalance is called 4 times per rebalance:
+    //   calls 1-2: pre-removal snapshot (before removeLiquidity) → return 0
+    //   calls 3-4: post-removal snapshot (after removeLiquidity) → return received amount
+    let getBalanceCallCount = 0;
     const mockSuiClient = {
       signAndExecuteTransaction: jest.fn()
         // call 1: removeLiquidity
@@ -353,7 +357,10 @@ describe('rebalance – live path uses fix-token add-liquidity', () => {
         })
         // call 3: addLiquidity
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
-      getBalance: jest.fn().mockResolvedValue({ totalBalance: '1000000' }),
+      getBalance: jest.fn().mockImplementation(() => {
+        getBalanceCallCount++;
+        return Promise.resolve({ totalBalance: getBalanceCallCount <= 2 ? '0' : '1000000' });
+      }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
     };
 
@@ -434,6 +441,7 @@ describe('rebalance – step 2 retries on "not available for consumption"', () =
       },
     };
 
+    let getBalanceCallCount = 0;
     const mockSuiClient = {
       signAndExecuteTransaction: jest.fn()
         // call 1: removeLiquidity succeeds
@@ -448,7 +456,11 @@ describe('rebalance – step 2 retries on "not available for consumption"', () =
         .mockRejectedValueOnce(new Error('Object 0xnewpos is not available for consumption'))
         // call 4: addLiquidity succeeds on retry
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
-      getBalance: jest.fn().mockResolvedValue({ totalBalance: '1000000' }),
+      // calls 1-2: pre-removal snapshot → 0; calls 3-4: post-removal → received amount
+      getBalance: jest.fn().mockImplementation(() => {
+        getBalanceCallCount++;
+        return Promise.resolve({ totalBalance: getBalanceCallCount <= 2 ? '0' : '1000000' });
+      }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
     };
 
@@ -509,10 +521,17 @@ describe('rebalance – openNewPosition input validation', () => {
       },
     };
 
+    // getBalance is called 4 times per rebalance:
+    //   calls 1-2: pre-removal snapshot → 0
+    //   calls 3-4: post-removal snapshot → balanceOverride (tokens received)
+    let getBalanceCallCount = 0;
     const mockSuiClient = {
       signAndExecuteTransaction: jest.fn()
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' }),
-      getBalance: jest.fn().mockResolvedValue({ totalBalance: balanceOverride }),
+      getBalance: jest.fn().mockImplementation(() => {
+        getBalanceCallCount++;
+        return Promise.resolve({ totalBalance: getBalanceCallCount <= 2 ? '0' : balanceOverride });
+      }),
     };
 
     const sdkService = {
@@ -594,7 +613,12 @@ describe('rebalance – openNewPosition input validation', () => {
           digest: '0xopen',
           objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         }),
-      getBalance: jest.fn().mockResolvedValue({ totalBalance: '1000000' }),
+      // calls 1-2: pre-removal → 0; calls 3-4: post-removal → received amount
+      getBalance: jest.fn()
+        .mockResolvedValueOnce({ totalBalance: '0' })
+        .mockResolvedValueOnce({ totalBalance: '0' })
+        .mockResolvedValueOnce({ totalBalance: '1000000' })
+        .mockResolvedValueOnce({ totalBalance: '1000000' }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
     };
 
@@ -648,6 +672,8 @@ describe('rebalance – position object verification before add-liquidity', () =
       },
     };
 
+    // calls 1-2: pre-removal snapshot → 0; calls 3-4: post-removal → received amount
+    let getBalanceCallCount = 0;
     const mockSuiClient = {
       signAndExecuteTransaction: jest.fn()
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
@@ -657,7 +683,10 @@ describe('rebalance – position object verification before add-liquidity', () =
           objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
-      getBalance: jest.fn().mockResolvedValue({ totalBalance: '1000000' }),
+      getBalance: jest.fn().mockImplementation(() => {
+        getBalanceCallCount++;
+        return Promise.resolve({ totalBalance: getBalanceCallCount <= 2 ? '0' : '1000000' });
+      }),
       getObject: getObjectMock,
     };
 
@@ -766,6 +795,8 @@ describe('rebalance – position object verification before add-liquidity', () =
       },
     };
 
+    // calls 1-2: pre-removal snapshot → 0; calls 3-4: post-removal → received amount
+    let getBalanceCallCount = 0;
     const mockSuiClient = {
       signAndExecuteTransaction: jest.fn()
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
@@ -782,7 +813,10 @@ describe('rebalance – position object verification before add-liquidity', () =
             },
           ],
         }),
-      getBalance: jest.fn().mockResolvedValue({ totalBalance: '1000000' }),
+      getBalance: jest.fn().mockImplementation(() => {
+        getBalanceCallCount++;
+        return Promise.resolve({ totalBalance: getBalanceCallCount <= 2 ? '0' : '1000000' });
+      }),
       getObject: jest.fn(),
     };
 
@@ -829,6 +863,8 @@ describe('rebalance – position object verification before add-liquidity', () =
       },
     };
 
+    // calls 1-2: pre-removal snapshot → 0; calls 3-4: post-removal → received amount
+    let getBalanceCallCount = 0;
     const mockSuiClient = {
       signAndExecuteTransaction: jest.fn()
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
@@ -845,7 +881,10 @@ describe('rebalance – position object verification before add-liquidity', () =
             },
           ],
         }),
-      getBalance: jest.fn().mockResolvedValue({ totalBalance: '1000000' }),
+      getBalance: jest.fn().mockImplementation(() => {
+        getBalanceCallCount++;
+        return Promise.resolve({ totalBalance: getBalanceCallCount <= 2 ? '0' : '1000000' });
+      }),
       // getObject returns the position as ObjectOwner — simulates a wrapped object.
       getObject: jest.fn().mockResolvedValue({
         data: { objectId: '0xnewpos', owner: { ObjectOwner: '0xparentobject' } },
@@ -926,6 +965,9 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
       },
     };
 
+    // calls 1-2: pre-removal snapshot → 0 for both tokens
+    // calls 3-4: post-removal snapshot → the configured received balances
+    let getBalanceCallCount = 0;
     const mockSuiClient = {
       signAndExecuteTransaction: jest.fn()
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
@@ -935,9 +977,11 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
           objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
-      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => ({
-        totalBalance: coinType === '0xcoinA' ? balanceA : balanceB,
-      })),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 2) return Promise.resolve({ totalBalance: '0' });
+        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? balanceA : balanceB });
+      }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos' } }),
     };
 
@@ -1055,6 +1099,9 @@ describe('rebalance – SUI gas reservation in wallet balances', () => {
       },
     };
 
+    // calls 1-2: pre-removal snapshot → 0 for both tokens
+    // calls 3-4: post-removal snapshot → the configured received balances
+    let getBalanceCallCount = 0;
     const mockSuiClient = {
       signAndExecuteTransaction: jest.fn()
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
@@ -1064,10 +1111,12 @@ describe('rebalance – SUI gas reservation in wallet balances', () => {
           objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
-      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => ({
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 2) return Promise.resolve({ totalBalance: '0' });
         // Return the pre-configured balance for whichever token is being queried.
-        totalBalance: coinType === coinTypeA ? balanceForA : balanceForB,
-      })),
+        return Promise.resolve({ totalBalance: coinType === coinTypeA ? balanceForA : balanceForB });
+      }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos' } }),
     };
 
@@ -1156,13 +1205,17 @@ describe('rebalance – SUI gas reservation in wallet balances', () => {
       },
     };
 
+    // calls 1-2: pre-removal → 0; calls 3-4: post-removal → SUI balance below gas reserve
+    let getBalanceCallCount = 0;
     const mockSuiClient = {
       signAndExecuteTransaction: jest.fn()
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' }),
       // SUI balance below 3× gas budget; other token also zero
-      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => ({
-        totalBalance: coinType === '0x2::sui::SUI' ? '100000000' : '0',
-      })),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 2) return Promise.resolve({ totalBalance: '0' });
+        return Promise.resolve({ totalBalance: coinType === '0x2::sui::SUI' ? '100000000' : '0' });
+      }),
     };
 
     const sdkService = {
@@ -1191,5 +1244,90 @@ describe('rebalance – SUI gas reservation in wallet balances', () => {
     );
     expect(args.amount_a).toBe('500000');
     expect(args.amount_b).toBe('800000');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rebalance — swap uses only tokens received from close_position
+// ---------------------------------------------------------------------------
+
+describe('rebalance – only close_position amounts used for swap and new position', () => {
+  afterEach(() => { delete process.env.DRY_RUN; });
+
+  it('uses pre/post balance delta (not total wallet balance) for swap and new position', async () => {
+    // Scenario: wallet has pre-existing balances of 5_000_000 for each token
+    // before close_position.  After close_position, the wallet receives
+    // 2_000_000 of tokenA and 3_000_000 of tokenB.
+    //
+    // The bot must only use the RECEIVED amounts (delta = post − pre),
+    // not the total post-removal wallet balance (7_000_000 / 8_000_000).
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = { gasBudget: 50_000_000, maxSlippage: 0.01, lowerTick: 400, upperTick: 600 } as any;
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    // Pre-existing wallet balances: 5_000_000 of each token (unrelated funds).
+    // After removeLiquidity the wallet gains 2_000_000 of A and 3_000_000 of B.
+    let callCount = 0;
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        callCount++;
+        // calls 1-2: pre-removal snapshot — pre-existing wallet balances
+        if (callCount <= 2) {
+          return Promise.resolve({ totalBalance: '5000000' });
+        }
+        // calls 3-4: post-removal snapshot — pre-existing + received from position
+        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '7000000' : '8000000' });
+      }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(1);
+
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0] as {
+      amount_a: string; amount_b: string;
+    };
+
+    // Must use received delta (7_000_000 − 5_000_000 = 2_000_000 and
+    // 8_000_000 − 5_000_000 = 3_000_000), NOT the full post-balance.
+    expect(callArgs.amount_a).toBe('2000000');
+    expect(callArgs.amount_b).toBe('3000000');
   });
 });

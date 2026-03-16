@@ -269,12 +269,54 @@ export class RebalanceService {
         throw new Error('Position liquidity is missing or zero — cannot proceed with rebalance');
       }
 
+      // Snapshot wallet balances BEFORE closing the position so we can compute
+      // the exact tokens received from close_position.  This prevents the bot
+      // from consuming pre-existing wallet funds that are unrelated to this
+      // position when performing the swap or opening the new position.
+      const suiClient = this.sdkService.getSuiClient();
+      const ownerAddress = this.sdkService.getAddress();
+      const [preBalA, preBalB] = await Promise.all([
+        suiClient.getBalance({ owner: ownerAddress, coinType: poolInfo.coinTypeA }),
+        suiClient.getBalance({ owner: ownerAddress, coinType: poolInfo.coinTypeB }),
+      ]);
+
       // Step 1: Remove liquidity from the out-of-range position.
       await this.removeLiquidity(position.positionId, storedLiquidity, poolInfo);
 
-      // Step 2: Check actual token balances in wallet.
-      const balances = await this.getWalletBalances(poolInfo.coinTypeA, poolInfo.coinTypeB);
-      logger.info('Wallet balances after removing liquidity', {
+      // Step 2: Compute the tokens received from close_position using the
+      // pre/post balance delta — never consume extra wallet funds.
+      const [postBalA, postBalB] = await Promise.all([
+        suiClient.getBalance({ owner: ownerAddress, coinType: poolInfo.coinTypeA }),
+        suiClient.getBalance({ owner: ownerAddress, coinType: poolInfo.coinTypeB }),
+      ]);
+
+      const gasReserve = BigInt(this.config.gasBudget) * 3n;
+      const isSuiA = this.normalizeCoinType(poolInfo.coinTypeA) === this.normalizeCoinType(SUI_COIN_TYPE);
+      const isSuiB = this.normalizeCoinType(poolInfo.coinTypeB) === this.normalizeCoinType(SUI_COIN_TYPE);
+
+      // Delta = post − pre captures exactly what was received from the position.
+      // Negative deltas (e.g. SUI gas cost exceeds received amount) are clamped to zero.
+      let receivedA = BigInt(postBalA.totalBalance || '0') - BigInt(preBalA.totalBalance || '0');
+      let receivedB = BigInt(postBalB.totalBalance || '0') - BigInt(preBalB.totalBalance || '0');
+      if (receivedA < 0n) receivedA = 0n;
+      if (receivedB < 0n) receivedB = 0n;
+
+      // For SUI tokens, further cap the usable amount to (postBalance − gasReserve)
+      // so that subsequent transactions (swap, open-position, add-liquidity) always
+      // have enough SUI to cover fees.
+      if (isSuiA) {
+        const postA = BigInt(postBalA.totalBalance || '0');
+        const maxA = postA > gasReserve ? postA - gasReserve : 0n;
+        if (receivedA > maxA) receivedA = maxA;
+      }
+      if (isSuiB) {
+        const postB = BigInt(postBalB.totalBalance || '0');
+        const maxB = postB > gasReserve ? postB - gasReserve : 0n;
+        if (receivedB > maxB) receivedB = maxB;
+      }
+
+      const balances = { amountA: receivedA.toString(), amountB: receivedB.toString() };
+      logger.info('Tokens received from close_position', {
         amountA: balances.amountA,
         amountB: balances.amountB,
         coinTypeA: poolInfo.coinTypeA,

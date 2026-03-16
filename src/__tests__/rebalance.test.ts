@@ -1023,14 +1023,16 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
   });
 
   it('fixes token A (fix_amount_a=true) when price is below the new range', async () => {
-    // currentTick(100) < tickLower(400) → position only accepts token A → fix A
-    const args = await runAndCaptureFixToken(100, SQRT_PRICE_TICK_100, 400, 600, '1000000', '1000000');
+    // currentTick(100) < tickLower(400) → position only accepts token A → fix A.
+    // Use only token A (no B) to avoid triggering the B→A swap path.
+    const args = await runAndCaptureFixToken(100, SQRT_PRICE_TICK_100, 400, 600, '1000000', '0');
     expect(args.fix_amount_a).toBe(true);
   });
 
   it('fixes token B (fix_amount_a=false) when price is at or above the new range', async () => {
-    // currentTick(700) >= tickUpper(600) → position only accepts token B → fix B
-    const args = await runAndCaptureFixToken(700, SQRT_PRICE_TICK_700, 400, 600, '1000000', '1000000');
+    // currentTick(700) >= tickUpper(600) → position only accepts token B → fix B.
+    // Use only token B (no A) to avoid triggering the A→B swap path.
+    const args = await runAndCaptureFixToken(700, SQRT_PRICE_TICK_700, 400, 600, '0', '1000000');
     expect(args.fix_amount_a).toBe(false);
   });
 
@@ -1042,6 +1044,146 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
     const sqrtPriceTick590 = '18999001155891605229';
     const args = await runAndCaptureFixToken(590, sqrtPriceTick590, 400, 600, '1000000', '2000000');
     expect(args.fix_amount_a).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// swapTokensIfNeeded — both tokens present but position is out of range
+// ---------------------------------------------------------------------------
+
+describe('rebalance – both tokens present with out-of-range new position triggers swap', () => {
+  afterEach(() => { delete process.env.DRY_RUN; });
+
+  /**
+   * Run a full rebalance where BOTH token balances are non-zero after closing,
+   * and the new tick range is out of range in the given direction.  Returns
+   * the direction and amount passed to the aggregator swap call.
+   */
+  async function runAndCaptureSwap(
+    currentTickIndex: number,
+    tickLower: number,
+    tickUpper: number,
+    balanceA: string,
+    balanceB: string,
+  ): Promise<{ a2b: boolean; amount: string }> {
+    process.env.DRY_RUN = 'false';
+
+    const pool = {
+      poolAddress: '0xpool',
+      currentTickIndex,
+      currentSqrtPrice: '18913701982652573318',
+      coinTypeA: '0xcoinA',
+      coinTypeB: '0xcoinB',
+      tickSpacing: 10,
+    };
+
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool as any);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: tickLower,
+      upperTick: tickUpper,
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createSwapTransactionPayload = jest.fn().mockReturnValue(mockTxStub);
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+
+    const mockSdk = {
+      RouterV2: {
+        getBestRouter: jest.fn().mockRejectedValue(new Error('aggregator unavailable')),
+      },
+      Swap: {
+        createSwapTransactionPayload,
+      },
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    let getBalanceCallCount = 0;
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        // removeLiquidity
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        // swap (fallback direct)
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xswap',
+          balanceChanges: [],
+        })
+        // openPosition NFT
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        // addLiquidity
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 2) return Promise.resolve({ totalBalance: '0' });
+        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? balanceA : balanceB });
+      }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    expect(createSwapTransactionPayload).toHaveBeenCalledTimes(1);
+
+    const swapArgs = createSwapTransactionPayload.mock.calls[0][0] as { a2b: boolean; amount: string };
+    return { a2b: swapArgs.a2b, amount: swapArgs.amount };
+  }
+
+  it('swaps ALL token B to A when both tokens are present but price is below the new range', async () => {
+    // Both tokens present after closing (e.g. position had accumulated fees in both
+    // directions). New range is below current price — only token A is accepted.
+    // The bot must convert all B to A rather than leaving it unused.
+    const swap = await runAndCaptureSwap(
+      100,   // currentTick — below range [400,600]
+      400,   // tickLower
+      600,   // tickUpper
+      '500000',   // balanceA (already have some A)
+      '800000',   // balanceB (must swap ALL of this to A)
+    );
+    expect(swap.a2b).toBe(false);          // B → A
+    expect(swap.amount).toBe('800000');    // swap the full B balance
+  });
+
+  it('swaps ALL token A to B when both tokens are present but price is above the new range', async () => {
+    // Both tokens present after closing (e.g. position had accumulated fees in both
+    // directions). New range is above current price — only token B is accepted.
+    // The bot must convert all A to B rather than leaving it unused.
+    const swap = await runAndCaptureSwap(
+      700,   // currentTick — above range [400,600]
+      400,   // tickLower
+      600,   // tickUpper
+      '800000',   // balanceA (must swap ALL of this to B)
+      '500000',   // balanceB (already have some B)
+    );
+    expect(swap.a2b).toBe(true);           // A → B
+    expect(swap.amount).toBe('800000');    // swap the full A balance
   });
 });
 

@@ -499,11 +499,6 @@ export class RebalanceService {
 
     if (bigA === 0n && bigB === 0n) return { amountA, amountB };
 
-    if (bigA > 0n && bigB > 0n) {
-      logger.info('Both tokens available — no swap needed');
-      return { amountA, amountB };
-    }
-
     const currentTick = poolInfo.currentTickIndex;
     const priceIsBelowRange = currentTick < tickLower;
     const priceIsAboveRange = currentTick >= tickUpper;
@@ -512,19 +507,32 @@ export class RebalanceService {
     let swapAmount = 0n;
 
     if (priceIsBelowRange) {
-      if (bigA === 0n && bigB > 0n) {
-        a2b = false; swapAmount = bigB; // swap all B→A
+      // Position only accepts token A below range — swap ALL token B to A so that
+      // the maximum amount is available for deposit (including any B received from
+      // fees when the previous position was still in range).
+      if (bigB > 0n) {
+        a2b = false; swapAmount = bigB; // swap ALL B→A
       } else {
-        return { amountA, amountB }; // already have A
+        return { amountA, amountB }; // only A (or nothing) — no swap needed
       }
     } else if (priceIsAboveRange) {
-      if (bigB === 0n && bigA > 0n) {
-        a2b = true; swapAmount = bigA; // swap all A→B
+      // Position only accepts token B above range — swap ALL token A to B so that
+      // the maximum amount is available for deposit (including any A received from
+      // fees when the previous position was still in range).
+      if (bigA > 0n) {
+        a2b = true; swapAmount = bigA; // swap ALL A→B
       } else {
-        return { amountA, amountB }; // already have B
+        return { amountA, amountB }; // only B (or nothing) — no swap needed
       }
     } else {
-      // In-range position needs both tokens — swap half of whichever we have.
+      // In-range position needs both tokens.
+      if (bigA > 0n && bigB > 0n) {
+        // Both tokens available — no swap needed; the fix_amount_a bottleneck
+        // logic in openNewPosition will handle the ratio correctly.
+        logger.info('Both tokens available — no swap needed');
+        return { amountA, amountB };
+      }
+      // One token is zero — swap half of the available token to obtain both.
       if (bigA > 0n) { a2b = true; swapAmount = bigA / 2n; }
       else { a2b = false; swapAmount = bigB / 2n; }
       if (swapAmount === 0n) return { amountA, amountB };

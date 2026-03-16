@@ -957,30 +957,46 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
     return createAddLiquidityFixTokenPayload.mock.calls[0][0] as { fix_amount_a: boolean };
   }
 
-  // sqrtPrice = 2^64 → price = 1 A : 1 B (value comparison reduces to amount comparison)
-  const SQRT_PRICE_ONE_TO_ONE = '18446744073709551616';
+  // Sqrt prices computed from TickMath.tickIndexToSqrtPriceX64 for consistency
+  // with the corrected fix_amount_a formula that uses TickMath internally.
+  // Tick 500 → '18913701982652573318', tick 100 → '18539204128674405812', tick 700 → '19103778296503601288'
+  const SQRT_PRICE_TICK_500 = '18913701982652573318';
+  const SQRT_PRICE_TICK_100 = '18539204128674405812';
+  const SQRT_PRICE_TICK_700 = '19103778296503601288';
 
-  it('fixes token B (fix_amount_a=false) when value_A > value_B (both tokens, in range)', async () => {
-    // amountA=2000000, amountB=1000000 at 1:1 price → value_A > value_B → fix B
-    const args = await runAndCaptureFixToken(500, SQRT_PRICE_ONE_TO_ONE, 400, 600, '2000000', '1000000');
+  it('fixes token B (fix_amount_a=false) when A is the liquidity-excess token (both tokens, in range)', async () => {
+    // amountA=2000000, amountB=1000000 at tick 500 in range [400,600]:
+    // L_a > L_b → B is the bottleneck → fix B (fix_amount_a=false)
+    const args = await runAndCaptureFixToken(500, SQRT_PRICE_TICK_500, 400, 600, '2000000', '1000000');
     expect(args.fix_amount_a).toBe(false);
   });
 
-  it('fixes token A (fix_amount_a=true) when value_A <= value_B (both tokens, in range)', async () => {
-    // amountA=500000, amountB=1000000 at 1:1 price → value_A < value_B → fix A
-    const args = await runAndCaptureFixToken(500, SQRT_PRICE_ONE_TO_ONE, 400, 600, '500000', '1000000');
+  it('fixes token A (fix_amount_a=true) when B is the liquidity-excess token (both tokens, in range)', async () => {
+    // amountA=500000, amountB=1000000 at tick 500 in range [400,600]:
+    // L_a < L_b → A is the bottleneck → fix A (fix_amount_a=true)
+    const args = await runAndCaptureFixToken(500, SQRT_PRICE_TICK_500, 400, 600, '500000', '1000000');
     expect(args.fix_amount_a).toBe(true);
   });
 
   it('fixes token A (fix_amount_a=true) when price is below the new range', async () => {
     // currentTick(100) < tickLower(400) → position only accepts token A → fix A
-    const args = await runAndCaptureFixToken(100, SQRT_PRICE_ONE_TO_ONE, 400, 600, '1000000', '1000000');
+    const args = await runAndCaptureFixToken(100, SQRT_PRICE_TICK_100, 400, 600, '1000000', '1000000');
     expect(args.fix_amount_a).toBe(true);
   });
 
   it('fixes token B (fix_amount_a=false) when price is at or above the new range', async () => {
     // currentTick(700) >= tickUpper(600) → position only accepts token B → fix B
-    const args = await runAndCaptureFixToken(700, SQRT_PRICE_ONE_TO_ONE, 400, 600, '1000000', '1000000');
+    const args = await runAndCaptureFixToken(700, SQRT_PRICE_TICK_700, 400, 600, '1000000', '1000000');
+    expect(args.fix_amount_a).toBe(false);
+  });
+
+  it('fixes token B (fix_amount_a=false) when price is near the top of the range', async () => {
+    // currentTick(590) near tickUpper(600) → mostly token B required.
+    // The old spot-price formula incorrectly chose fix_amount_a=true here; the
+    // correct CLMM formula chooses fix_amount_a=false, preventing InsufficientCoinBalance.
+    // Tick 590 sqrtPrice = '18999001155891605229'
+    const sqrtPriceTick590 = '18999001155891605229';
+    const args = await runAndCaptureFixToken(590, sqrtPriceTick590, 400, 600, '1000000', '2000000');
     expect(args.fix_amount_a).toBe(false);
   });
 });
@@ -1008,7 +1024,7 @@ describe('rebalance – SUI gas reservation in wallet balances', () => {
     const pool = {
       poolAddress: '0xpool',
       currentTickIndex: 500,
-      currentSqrtPrice: '18446744073709551616', // sqrt price 1:1
+      currentSqrtPrice: '18913701982652573318', // TickMath(500) — consistent with currentTickIndex
       coinTypeA,
       coinTypeB,
       tickSpacing: 10,
@@ -1070,9 +1086,11 @@ describe('rebalance – SUI gas reservation in wallet balances', () => {
     return createAddLiquidityFixTokenPayload.mock.calls[0][0] as { amount_a: string; amount_b: string };
   }
 
-  it('subtracts gas budget from SUI amount_a when coinTypeA is SUI', async () => {
+  it('subtracts 3× gas budget from SUI amount_a when coinTypeA is SUI', async () => {
     // coinTypeA = SUI with raw balance 200_000_000 MIST; gas budget = 50_000_000 MIST
-    // expected amount_a = 200_000_000 − 50_000_000 = 150_000_000
+    // Three transactions can follow (swap + open NFT + add liquidity), so the
+    // reservation is 3 × 50_000_000 = 150_000_000.
+    // expected amount_a = 200_000_000 − 150_000_000 = 50_000_000
     const args = await runWithSuiToken(
       '0x2::sui::SUI', // coinTypeA
       '0xcoinB',       // coinTypeB
@@ -1080,13 +1098,13 @@ describe('rebalance – SUI gas reservation in wallet balances', () => {
       '1000000',       // balanceForB (non-SUI)
       50_000_000,
     );
-    expect(args.amount_a).toBe('150000000');
+    expect(args.amount_a).toBe('50000000');
     expect(args.amount_b).toBe('1000000'); // non-SUI token unchanged
   });
 
-  it('subtracts gas budget from SUI amount_b when coinTypeB is SUI', async () => {
+  it('subtracts 3× gas budget from SUI amount_b when coinTypeB is SUI', async () => {
     // coinTypeB = SUI with raw balance 200_000_000 MIST; gas budget = 50_000_000 MIST
-    // expected amount_b = 200_000_000 − 50_000_000 = 150_000_000
+    // expected amount_b = 200_000_000 − 150_000_000 = 50_000_000
     const args = await runWithSuiToken(
       '0xcoinA',       // coinTypeA (non-SUI)
       '0x2::sui::SUI', // coinTypeB (SUI)
@@ -1095,11 +1113,11 @@ describe('rebalance – SUI gas reservation in wallet balances', () => {
       50_000_000,
     );
     expect(args.amount_a).toBe('500000');   // non-SUI token unchanged
-    expect(args.amount_b).toBe('150000000'); // SUI: 200_000_000 − 50_000_000
+    expect(args.amount_b).toBe('50000000'); // SUI: 200_000_000 − 3 × 50_000_000
   });
 
-  it('clamps SUI amount to 0 when balance does not exceed gas budget, causing failure when no other token is available', async () => {
-    // raw SUI balance = 30_000_000 MIST < gas budget 50_000_000 MIST
+  it('clamps SUI amount to 0 when balance does not exceed 3× gas budget, causing failure when no other token is available', async () => {
+    // raw SUI balance = 100_000_000 MIST < 3 × gas budget (150_000_000 MIST)
     // Both token balances are effectively 0 after clamping, so openNewPosition fails
     // with "No token amounts available" — this is correct: the wallet cannot cover
     // gas fees AND provide any liquidity.
@@ -1108,7 +1126,7 @@ describe('rebalance – SUI gas reservation in wallet balances', () => {
     const pool = {
       poolAddress: '0xpool',
       currentTickIndex: 500,
-      currentSqrtPrice: '18446744073709551616',
+      currentSqrtPrice: '18913701982652573318', // TickMath(500)
       coinTypeA: '0x2::sui::SUI',
       coinTypeB: '0xcoinB',
       tickSpacing: 10,
@@ -1141,9 +1159,9 @@ describe('rebalance – SUI gas reservation in wallet balances', () => {
     const mockSuiClient = {
       signAndExecuteTransaction: jest.fn()
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' }),
-      // SUI balance below gas budget; other token also zero
+      // SUI balance below 3× gas budget; other token also zero
       getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => ({
-        totalBalance: coinType === '0x2::sui::SUI' ? '30000000' : '0',
+        totalBalance: coinType === '0x2::sui::SUI' ? '100000000' : '0',
       })),
     };
 

@@ -3,7 +3,7 @@ import { PositionMonitorService, PoolInfo, PositionInfo } from './monitor';
 import { BotConfig } from '../config';
 import { logger } from '../utils/logger';
 import BN from 'bn.js';
-import { TransactionUtil } from '@cetusprotocol/cetus-sui-clmm-sdk';
+import { TransactionUtil, TickMath } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import type { AddLiquidityFixTokenParams, CoinAsset, SwapParams } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import type { BalanceChange } from '@mysten/sui/client';
 
@@ -404,7 +404,12 @@ export class RebalanceService {
       suiClient.getBalance({ owner: ownerAddress, coinType: coinTypeB }),
     ]);
 
-    const gasBudget = BigInt(this.config.gasBudget);
+    // Reserve gas for the three transactions that may execute after this balance
+    // read: (1) optional token swap, (2) open-position NFT, (3) add-liquidity.
+    // Reserving only 1 × gasBudget left insufficient SUI to cover gas for step 2
+    // after step 1 had already consumed up to gasBudget, causing the on-chain
+    // "InsufficientCoinBalance in command 1" error.
+    const gasReserve = BigInt(this.config.gasBudget) * 3n;
     const isSuiA = this.normalizeCoinType(coinTypeA) === this.normalizeCoinType(SUI_COIN_TYPE);
     const isSuiB = this.normalizeCoinType(coinTypeB) === this.normalizeCoinType(SUI_COIN_TYPE);
 
@@ -412,10 +417,10 @@ export class RebalanceService {
     let amountB = BigInt(balB.totalBalance || '0');
 
     if (isSuiA) {
-      amountA = amountA > gasBudget ? amountA - gasBudget : 0n;
+      amountA = amountA > gasReserve ? amountA - gasReserve : 0n;
     }
     if (isSuiB) {
-      amountB = amountB > gasBudget ? amountB - gasBudget : 0n;
+      amountB = amountB > gasReserve ? amountB - gasReserve : 0n;
     }
 
     return {
@@ -779,15 +784,22 @@ export class RebalanceService {
     //                                                      always fix A.
     //   • Price above range  (currentTick >= tickUpper) → only token B accepted;
     //                                                      always fix B.
-    //   • Price in range                                → fix whichever token has
-    //                                                      the lower current value
-    //                                                      so the computed amount
-    //                                                      of the other token never
-    //                                                      exceeds our balance.
+    //   • Price in range                                → fix whichever token is
+    //                                                      the liquidity bottleneck,
+    //                                                      i.e. the one that yields
+    //                                                      the smaller delta_liquidity.
     //
-    // Value comparison (in-range):
-    //   value_A_in_B = amountA × (sqrtPrice / 2^64)² = amountA × sqrtPrice² / 2^128
-    //   fix A when value_A ≤ value_B  ↔  amountA × sqrtPrice² ≤ amountB × 2^128
+    // Correct CLMM liquidity-bottleneck comparison (all sqrt prices in Q64):
+    //   L_a = amountA × P × Pb / ((Pb − P) × 2^64)
+    //   L_b = amountB × 2^64 / (P − Pa)
+    //   fix A when L_a ≤ L_b
+    //     ↔  amountA × P × Pb × (P − Pa) ≤ amountB × 2^128 × (Pb − P)
+    //
+    // where Pa = sqrtPrice(tickLower) and Pb = sqrtPrice(tickUpper) are obtained
+    // from TickMath so the comparison correctly accounts for the tick-range shape.
+    // The old approximation (amountA × P² ≤ amountB × 2^128) only holds when the
+    // range is symmetric around the geometric mean, and diverges enough near either
+    // bound to cause InsufficientCoinBalance for the non-fixed token.
     let fix_amount_a: boolean;
     const currentTick = poolInfo.currentTickIndex;
     if (bigAmtA === 0n) {
@@ -801,11 +813,28 @@ export class RebalanceService {
       // Price is above range — the position only accepts token B.
       fix_amount_a = false;
     } else {
-      // Price is in range — fix the lower-value token so the SDK's computed
-      // amount of the other token stays within our wallet balance.
-      const sqrtPriceBig = BigInt(poolInfo.currentSqrtPrice);
+      // Price is in range — determine the liquidity bottleneck using the
+      // correct CLMM formula so the SDK never computes a required amount
+      // that exceeds our available balance.
+      const sqrtPriceBig    = BigInt(poolInfo.currentSqrtPrice);
+      const sqrtPriceLower  = BigInt(TickMath.tickIndexToSqrtPriceX64(tickLower).toString());
+      const sqrtPriceUpper  = BigInt(TickMath.tickIndexToSqrtPriceX64(tickUpper).toString());
       const TWO_128 = 2n ** 128n;
-      fix_amount_a = bigAmtA * sqrtPriceBig * sqrtPriceBig <= bigAmtB * TWO_128;
+
+      // Guard: if currentSqrtPrice is inconsistent with the tick-index checks
+      // above (e.g. data from a lagging RPC node or synthetic test data), the
+      // subtraction (sqrtPriceBig − sqrtPriceLower) could underflow.  Apply the
+      // conservative single-token direction based on where the sqrt price falls
+      // relative to the computed tick-bound sqrt prices.
+      if (sqrtPriceBig <= sqrtPriceLower) {
+        fix_amount_a = true;
+      } else if (sqrtPriceBig >= sqrtPriceUpper) {
+        fix_amount_a = false;
+      } else {
+        fix_amount_a =
+          bigAmtA * sqrtPriceBig * sqrtPriceUpper * (sqrtPriceBig - sqrtPriceLower) <=
+          bigAmtB * TWO_128 * (sqrtPriceUpper - sqrtPriceBig);
+      }
     }
 
     logger.info('Opening new position — step 2: deposit tokens', {

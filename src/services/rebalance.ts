@@ -187,13 +187,37 @@ export class RebalanceService {
       }
 
       // Read wallet balances.
-      const balances = await this.getWalletBalances(poolInfo.coinTypeA, poolInfo.coinTypeB);
+      const walletBalances = await this.getWalletBalances(poolInfo.coinTypeA, poolInfo.coinTypeB);
       logger.info('Wallet balances for initial position', {
-        amountA: balances.amountA,
-        amountB: balances.amountB,
+        amountA: walletBalances.amountA,
+        amountB: walletBalances.amountB,
         coinTypeA: poolInfo.coinTypeA,
         coinTypeB: poolInfo.coinTypeB,
       });
+
+      // If env token amounts are configured, use them (capped to the available
+      // wallet balance so we never attempt to spend more than is held).
+      let amountA = BigInt(walletBalances.amountA);
+      let amountB = BigInt(walletBalances.amountB);
+
+      if (this.config.tokenAAmount !== undefined) {
+        const envA = BigInt(this.config.tokenAAmount);
+        if (envA < amountA) amountA = envA;
+        logger.info('Using TOKEN_A_AMOUNT from env for initial position', {
+          requested: this.config.tokenAAmount,
+          effective: amountA.toString(),
+        });
+      }
+      if (this.config.tokenBAmount !== undefined) {
+        const envB = BigInt(this.config.tokenBAmount);
+        if (envB < amountB) amountB = envB;
+        logger.info('Using TOKEN_B_AMOUNT from env for initial position', {
+          requested: this.config.tokenBAmount,
+          effective: amountB.toString(),
+        });
+      }
+
+      const balances = { amountA: amountA.toString(), amountB: amountB.toString() };
 
       // Swap to correct token ratio if needed.
       const adjusted = await this.swapTokensIfNeeded(

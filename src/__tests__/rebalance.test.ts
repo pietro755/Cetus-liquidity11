@@ -2004,3 +2004,164 @@ describe('rebalance – top-up liquidity when new position is below close_positi
     expect((monitor.getPositions as jest.Mock)).toHaveBeenCalledTimes(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// createInitialPosition — env token amounts
+// ---------------------------------------------------------------------------
+
+describe('createInitialPosition – env token amounts', () => {
+  afterEach(() => { delete process.env.DRY_RUN; });
+
+  /**
+   * Helper that sets up a live (non-dry-run) createInitialPosition scenario
+   * where the wallet holds walletA of tokenA and walletB of tokenB.
+   * Returns the mock SDK's createAddLiquidityFixTokenPayload for inspection.
+   */
+  function makeInitialPositionScenario(opts: {
+    walletA: string;
+    walletB: string;
+    tokenAAmount?: string;
+    tokenBAmount?: string;
+  }) {
+    process.env.DRY_RUN = 'false';
+
+    // No existing positions → createInitialPosition is invoked.
+    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const monitor = makeMonitor([], pool);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      tokenAAmount: opts.tokenAAmount,
+      tokenBAmount: opts.tokenBAmount,
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      Position: {
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        // call 1: openPosition (NFT)
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{
+            type: 'created',
+            objectType: 'position',
+            objectId: '0xnewpos',
+            owner: { AddressOwner: '0xwallet' },
+          }],
+        })
+        // call 2: addLiquidity
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      // getBalance is called once for tokenA and once for tokenB
+      getBalance: jest.fn()
+        .mockResolvedValueOnce({ totalBalance: opts.walletA })
+        .mockResolvedValueOnce({ totalBalance: opts.walletB }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    return { pool, monitor, config, sdkService, createAddLiquidityFixTokenPayload };
+  }
+
+  it('uses env TOKEN_A_AMOUNT when set and smaller than wallet balance', async () => {
+    const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
+      makeInitialPositionScenario({
+        walletA: '5000000',
+        walletB: '5000000',
+        tokenAAmount: '2000000',
+        tokenBAmount: undefined,
+      });
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    // amount_a must be capped to the env-configured value (2000000), not the full wallet balance (5000000).
+    expect(BigInt(callArgs.amount_a)).toBeLessThanOrEqual(2000000n);
+  });
+
+  it('uses env TOKEN_B_AMOUNT when set and smaller than wallet balance', async () => {
+    const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
+      makeInitialPositionScenario({
+        walletA: '5000000',
+        walletB: '5000000',
+        tokenAAmount: undefined,
+        tokenBAmount: '1500000',
+      });
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    // amount_b must be capped to the env-configured value (1500000), not the full wallet balance (5000000).
+    expect(BigInt(callArgs.amount_b)).toBeLessThanOrEqual(1500000n);
+  });
+
+  it('caps env TOKEN_A_AMOUNT to wallet balance when env amount exceeds balance', async () => {
+    const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
+      makeInitialPositionScenario({
+        walletA: '1000000',
+        walletB: '5000000',
+        tokenAAmount: '9999999',  // larger than wallet balance
+        tokenBAmount: undefined,
+      });
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    // amount_a must be capped to the actual wallet balance (1000000), not the env value (9999999).
+    expect(BigInt(callArgs.amount_a)).toBeLessThanOrEqual(1000000n);
+  });
+
+  it('uses full wallet balance when no env token amounts are configured', async () => {
+    const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
+      makeInitialPositionScenario({
+        walletA: '3000000',
+        walletB: '3000000',
+        // tokenAAmount and tokenBAmount are undefined
+      });
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    // Without env overrides, the full wallet balance should flow through to the SDK call.
+    expect(typeof callArgs.amount_a).toBe('string');
+    expect(typeof callArgs.amount_b).toBe('string');
+    // Amounts must be non-negative integers.
+    expect(/^\d+$/.test(callArgs.amount_a)).toBe(true);
+    expect(/^\d+$/.test(callArgs.amount_b)).toBe(true);
+  });
+});

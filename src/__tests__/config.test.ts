@@ -149,8 +149,79 @@ describe('loadConfig – optional numeric & boolean variables', () => {
 });
 
 // ---------------------------------------------------------------------------
-// maxSlippage safety validation (mainnet critical)
+// TOKEN_A_AMOUNT / TOKEN_B_AMOUNT validation
 // ---------------------------------------------------------------------------
+
+describe('loadConfig – TOKEN_A_AMOUNT / TOKEN_B_AMOUNT validation', () => {
+  beforeEach(() => {
+    process.env.PRIVATE_KEY = VALID_KEY;
+    process.env.POOL_ADDRESS = VALID_POOL;
+    delete process.env.TOKEN_A_AMOUNT;
+    delete process.env.TOKEN_B_AMOUNT;
+  });
+
+  it('accepts a valid positive integer for TOKEN_A_AMOUNT', () => {
+    process.env.TOKEN_A_AMOUNT = '1000000';
+    const { loadConfig } = loadFresh();
+    expect(loadConfig().tokenAAmount).toBe('1000000');
+  });
+
+  it('accepts a valid positive integer for TOKEN_B_AMOUNT', () => {
+    process.env.TOKEN_B_AMOUNT = '500000';
+    const { loadConfig } = loadFresh();
+    expect(loadConfig().tokenBAmount).toBe('500000');
+  });
+
+  it('leaves tokenAAmount undefined when TOKEN_A_AMOUNT is not set', () => {
+    const { loadConfig } = loadFresh();
+    expect(loadConfig().tokenAAmount).toBeUndefined();
+  });
+
+  it('leaves tokenBAmount undefined when TOKEN_B_AMOUNT is not set', () => {
+    const { loadConfig } = loadFresh();
+    expect(loadConfig().tokenBAmount).toBeUndefined();
+  });
+
+  it('rejects a non-numeric TOKEN_A_AMOUNT', () => {
+    process.env.TOKEN_A_AMOUNT = 'abc';
+    expect(() => loadFresh()).toThrow(/TOKEN_A_AMOUNT/);
+  });
+
+  it('rejects a non-numeric TOKEN_B_AMOUNT', () => {
+    process.env.TOKEN_B_AMOUNT = 'xyz';
+    expect(() => loadFresh()).toThrow(/TOKEN_B_AMOUNT/);
+  });
+
+  it('rejects TOKEN_A_AMOUNT of zero', () => {
+    process.env.TOKEN_A_AMOUNT = '0';
+    expect(() => loadFresh()).toThrow(/TOKEN_A_AMOUNT/);
+  });
+
+  it('rejects TOKEN_B_AMOUNT of zero', () => {
+    process.env.TOKEN_B_AMOUNT = '0';
+    expect(() => loadFresh()).toThrow(/TOKEN_B_AMOUNT/);
+  });
+
+  it('rejects a negative TOKEN_A_AMOUNT', () => {
+    process.env.TOKEN_A_AMOUNT = '-500';
+    expect(() => loadFresh()).toThrow(/TOKEN_A_AMOUNT/);
+  });
+
+  it('rejects a negative TOKEN_B_AMOUNT', () => {
+    process.env.TOKEN_B_AMOUNT = '-1';
+    expect(() => loadFresh()).toThrow(/TOKEN_B_AMOUNT/);
+  });
+
+  it('rejects a decimal TOKEN_A_AMOUNT', () => {
+    process.env.TOKEN_A_AMOUNT = '1.5';
+    expect(() => loadFresh()).toThrow(/TOKEN_A_AMOUNT/);
+  });
+
+  it('rejects a decimal TOKEN_B_AMOUNT', () => {
+    process.env.TOKEN_B_AMOUNT = '2.5';
+    expect(() => loadFresh()).toThrow(/TOKEN_B_AMOUNT/);
+  });
+});
 
 describe('loadConfig – maxSlippage safety guard', () => {
   beforeEach(() => {

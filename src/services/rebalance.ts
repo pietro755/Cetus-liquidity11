@@ -364,6 +364,29 @@ export class RebalanceService {
         if (receivedB > maxB) receivedB = maxB;
       }
 
+      // Apply env-configured token amount caps so that rebalanced positions are
+      // never larger than the user-specified TOKEN_A_AMOUNT / TOKEN_B_AMOUNT limits.
+      if (this.config.tokenAAmount !== undefined) {
+        const envA = BigInt(this.config.tokenAAmount);
+        if (envA < receivedA) {
+          receivedA = envA;
+          logger.info('Using TOKEN_A_AMOUNT from env for rebalanced position', {
+            requested: this.config.tokenAAmount,
+            effective: receivedA.toString(),
+          });
+        }
+      }
+      if (this.config.tokenBAmount !== undefined) {
+        const envB = BigInt(this.config.tokenBAmount);
+        if (envB < receivedB) {
+          receivedB = envB;
+          logger.info('Using TOKEN_B_AMOUNT from env for rebalanced position', {
+            requested: this.config.tokenBAmount,
+            effective: receivedB.toString(),
+          });
+        }
+      }
+
       const balances = { amountA: receivedA.toString(), amountB: receivedB.toString() };
       logger.info('Tokens received from close_position', {
         amountA: balances.amountA,

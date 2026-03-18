@@ -343,12 +343,44 @@ export class RebalanceService {
       const isSuiA = this.normalizeCoinType(poolInfo.coinTypeA) === this.normalizeCoinType(SUI_COIN_TYPE);
       const isSuiB = this.normalizeCoinType(poolInfo.coinTypeB) === this.normalizeCoinType(SUI_COIN_TYPE);
 
-      // Delta = post − pre captures exactly what was received from the position.
-      // Negative deltas (e.g. SUI gas cost exceeds received amount) are clamped to zero.
-      let receivedA = BigInt(postBalA.totalBalance || '0') - BigInt(preBalA.totalBalance || '0');
-      let receivedB = BigInt(postBalB.totalBalance || '0') - BigInt(preBalB.totalBalance || '0');
-      if (receivedA < 0n) receivedA = 0n;
-      if (receivedB < 0n) receivedB = 0n;
+      // When env amounts are configured, use the full post-removal wallet balance
+      // capped to the env amount — matching the behaviour of createInitialPosition.
+      // This ensures the bot always targets the user-specified amounts even when
+      // the position removal delta alone is smaller than the configured limit.
+      //
+      // When no env amount is set, fall back to the safe delta approach (post − pre)
+      // so that pre-existing wallet funds are never consumed unintentionally.
+      let receivedA: bigint;
+      let receivedB: bigint;
+
+      if (this.config.tokenAAmount !== undefined) {
+        const postA = BigInt(postBalA.totalBalance || '0');
+        const envA = BigInt(this.config.tokenAAmount);
+        receivedA = postA < envA ? postA : envA;
+        logger.info('Using TOKEN_A_AMOUNT from env for rebalanced position', {
+          requested: this.config.tokenAAmount,
+          effective: receivedA.toString(),
+          cappedByEnv: postA >= envA,
+        });
+      } else {
+        // Delta = post − pre; clamped to zero for negative values (e.g. SUI gas).
+        receivedA = BigInt(postBalA.totalBalance || '0') - BigInt(preBalA.totalBalance || '0');
+        if (receivedA < 0n) receivedA = 0n;
+      }
+
+      if (this.config.tokenBAmount !== undefined) {
+        const postB = BigInt(postBalB.totalBalance || '0');
+        const envB = BigInt(this.config.tokenBAmount);
+        receivedB = postB < envB ? postB : envB;
+        logger.info('Using TOKEN_B_AMOUNT from env for rebalanced position', {
+          requested: this.config.tokenBAmount,
+          effective: receivedB.toString(),
+          cappedByEnv: postB >= envB,
+        });
+      } else {
+        receivedB = BigInt(postBalB.totalBalance || '0') - BigInt(preBalB.totalBalance || '0');
+        if (receivedB < 0n) receivedB = 0n;
+      }
 
       // For SUI tokens, further cap the usable amount to (postBalance − gasReserve)
       // so that subsequent transactions (swap, open-position, add-liquidity) always
@@ -362,29 +394,6 @@ export class RebalanceService {
         const postB = BigInt(postBalB.totalBalance || '0');
         const maxB = postB > gasReserve ? postB - gasReserve : 0n;
         if (receivedB > maxB) receivedB = maxB;
-      }
-
-      // Apply env-configured token amount caps so that rebalanced positions are
-      // never larger than the user-specified TOKEN_A_AMOUNT / TOKEN_B_AMOUNT limits.
-      if (this.config.tokenAAmount !== undefined) {
-        const envA = BigInt(this.config.tokenAAmount);
-        if (envA < receivedA) {
-          receivedA = envA;
-          logger.info('Using TOKEN_A_AMOUNT from env for rebalanced position', {
-            requested: this.config.tokenAAmount,
-            effective: receivedA.toString(),
-          });
-        }
-      }
-      if (this.config.tokenBAmount !== undefined) {
-        const envB = BigInt(this.config.tokenBAmount);
-        if (envB < receivedB) {
-          receivedB = envB;
-          logger.info('Using TOKEN_B_AMOUNT from env for rebalanced position', {
-            requested: this.config.tokenBAmount,
-            effective: receivedB.toString(),
-          });
-        }
       }
 
       const balances = { amountA: receivedA.toString(), amountB: receivedB.toString() };

@@ -1995,6 +1995,10 @@ describe('rebalancePosition – env token amounts', () => {
     receivedB: string;
     tokenAAmount?: string;
     tokenBAmount?: string;
+    /** Pre-existing wallet balance for tokenA before position removal (default: '0'). */
+    preBalA?: string;
+    /** Pre-existing wallet balance for tokenB before position removal (default: '0'). */
+    preBalB?: string;
   }) {
     process.env.DRY_RUN = 'false';
 
@@ -2027,9 +2031,12 @@ describe('rebalancePosition – env token amounts', () => {
       },
     };
 
+    const preA = opts.preBalA ?? '0';
+    const preB = opts.preBalB ?? '0';
+
     // getBalance calls:
-    //   calls 1-2: pre-removal snapshot → 0
-    //   calls 3-4: post-removal snapshot → received amounts
+    //   calls 1-2: pre-removal snapshot → pre-existing balances
+    //   calls 3-4: post-removal snapshot → pre-existing + received amounts
     let getBalanceCallCount = 0;
     const mockSuiClient = {
       signAndExecuteTransaction: jest.fn()
@@ -2045,10 +2052,15 @@ describe('rebalancePosition – env token amounts', () => {
         .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
       getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
         getBalanceCallCount++;
-        if (getBalanceCallCount <= 2) return Promise.resolve({ totalBalance: '0' });
-        // post-removal: tokenA is call 3, tokenB is call 4
         const isA = coinType === '0xcoinA';
-        return Promise.resolve({ totalBalance: isA ? opts.receivedA : opts.receivedB });
+        if (getBalanceCallCount <= 2) {
+          // pre-removal: return pre-existing wallet balance
+          return Promise.resolve({ totalBalance: isA ? preA : preB });
+        }
+        // post-removal: pre-existing + received from position
+        const postA = (BigInt(preA) + BigInt(opts.receivedA)).toString();
+        const postB = (BigInt(preB) + BigInt(opts.receivedB)).toString();
+        return Promise.resolve({ totalBalance: isA ? postA : postB });
       }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
     };
@@ -2144,5 +2156,84 @@ describe('rebalancePosition – env token amounts', () => {
     expect(typeof callArgs.amount_b).toBe('string');
     expect(/^\d+$/.test(callArgs.amount_a)).toBe(true);
     expect(/^\d+$/.test(callArgs.amount_b)).toBe(true);
+  });
+
+  it('uses env TOKEN_A_AMOUNT from full post-removal wallet balance when env exceeds removal delta', async () => {
+    // Bug scenario: user has 500000 pre-existing tokenA in wallet.
+    // Position removal returns an additional 300000 tokenA (total post: 800000).
+    // TOKEN_A_AMOUNT = 600000 — larger than the 300000 delta but within the
+    // 800000 total post-removal balance.  The bot must use 600000, not just 300000.
+    const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
+      makeRebalanceEnvAmountScenario({
+        receivedA: '300000',
+        receivedB: '5000000',
+        preBalA: '500000',
+        preBalB: '0',
+        tokenAAmount: '600000',
+        tokenBAmount: undefined,
+      });
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    // The bot must use the full env-configured TOKEN_A_AMOUNT (600000), drawing
+    // from the complete post-removal wallet balance (800000), not just the
+    // 300000 delta from position removal.
+    expect(BigInt(callArgs.amount_a)).toBeLessThanOrEqual(600000n);
+    expect(BigInt(callArgs.amount_a)).toBeGreaterThan(300000n);
+  });
+
+  it('uses env TOKEN_B_AMOUNT from full post-removal wallet balance when env exceeds removal delta', async () => {
+    // Mirror of the tokenA test for tokenB.
+    const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
+      makeRebalanceEnvAmountScenario({
+        receivedA: '5000000',
+        receivedB: '300000',
+        preBalA: '0',
+        preBalB: '500000',
+        tokenAAmount: undefined,
+        tokenBAmount: '600000',
+      });
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    // TOKEN_B_AMOUNT (600000) must be honored from the full 800000 post-removal
+    // balance, not capped to the 300000 delta.
+    expect(BigInt(callArgs.amount_b)).toBeLessThanOrEqual(600000n);
+    expect(BigInt(callArgs.amount_b)).toBeGreaterThan(300000n);
+  });
+
+  it('only uses removal delta when no env amounts are set, even with pre-existing wallet balance', async () => {
+    // Without env amounts configured, the bot must not consume pre-existing wallet
+    // funds — only the tokens received from the position removal should be used.
+    const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
+      makeRebalanceEnvAmountScenario({
+        receivedA: '300000',
+        receivedB: '300000',
+        preBalA: '1000000',  // 1M pre-existing — should NOT be touched
+        preBalB: '1000000',
+        // no env amounts
+      });
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    // Without env amounts, only the delta (300000) should be used — not the full
+    // post-removal balance (1300000).
+    expect(BigInt(callArgs.amount_a)).toBeLessThanOrEqual(300000n);
+    expect(BigInt(callArgs.amount_b)).toBeLessThanOrEqual(300000n);
   });
 });

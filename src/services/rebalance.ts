@@ -7,9 +7,6 @@ import { TransactionUtil, TickMath } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import type { AddLiquidityFixTokenParams, CoinAsset, SwapParams } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import type { BalanceChange } from '@mysten/sui/client';
 
-/** The canonical Sui coin type used to identify the native SUI token. */
-const SUI_COIN_TYPE = '0x2::sui::SUI';
-
 export interface RebalanceResult {
   success: boolean;
   transactionDigest?: string;
@@ -186,38 +183,16 @@ export class RebalanceService {
         };
       }
 
-      // Read wallet balances.
-      const walletBalances = await this.getWalletBalances(poolInfo.coinTypeA, poolInfo.coinTypeB);
-      logger.info('Wallet balances for initial position', {
-        amountA: walletBalances.amountA,
-        amountB: walletBalances.amountB,
-        coinTypeA: poolInfo.coinTypeA,
-        coinTypeB: poolInfo.coinTypeB,
+      // Use the exact env-configured token amounts — never derive from wallet balance.
+      logger.info('Using env-configured token amounts for initial position', {
+        tokenAAmount: this.config.tokenAAmount,
+        tokenBAmount: this.config.tokenBAmount,
       });
 
-      // If env token amounts are configured, use them (capped to the available
-      // wallet balance so we never attempt to spend more than is held).
-      let amountA = BigInt(walletBalances.amountA);
-      let amountB = BigInt(walletBalances.amountB);
-
-      if (this.config.tokenAAmount !== undefined) {
-        const envA = BigInt(this.config.tokenAAmount);
-        if (envA < amountA) amountA = envA;
-        logger.info('Using TOKEN_A_AMOUNT from env for initial position', {
-          requested: this.config.tokenAAmount,
-          effective: amountA.toString(),
-        });
-      }
-      if (this.config.tokenBAmount !== undefined) {
-        const envB = BigInt(this.config.tokenBAmount);
-        if (envB < amountB) amountB = envB;
-        logger.info('Using TOKEN_B_AMOUNT from env for initial position', {
-          requested: this.config.tokenBAmount,
-          effective: amountB.toString(),
-        });
-      }
-
-      const balances = { amountA: amountA.toString(), amountB: amountB.toString() };
+      const balances = {
+        amountA: this.config.tokenAAmount,
+        amountB: this.config.tokenBAmount,
+      };
 
       // Swap to correct token ratio if needed.
       const adjusted = await this.swapTokensIfNeeded(
@@ -318,91 +293,20 @@ export class RebalanceService {
         throw new Error('Position liquidity is missing or zero — cannot proceed with rebalance');
       }
 
-      // Snapshot wallet balances BEFORE closing the position so we can compute
-      // the exact tokens received from close_position.  This prevents the bot
-      // from consuming pre-existing wallet funds that are unrelated to this
-      // position when performing the swap or opening the new position.
-      const suiClient = this.sdkService.getSuiClient();
-      const ownerAddress = this.sdkService.getAddress();
-      const [preBalA, preBalB] = await Promise.all([
-        suiClient.getBalance({ owner: ownerAddress, coinType: poolInfo.coinTypeA }),
-        suiClient.getBalance({ owner: ownerAddress, coinType: poolInfo.coinTypeB }),
-      ]);
-
       // Step 1: Remove liquidity from the out-of-range position.
       await this.removeLiquidity(position.positionId, storedLiquidity, poolInfo);
 
-      // Step 2: Compute the tokens received from close_position using the
-      // pre/post balance delta — never consume extra wallet funds.
-      const [postBalA, postBalB] = await Promise.all([
-        suiClient.getBalance({ owner: ownerAddress, coinType: poolInfo.coinTypeA }),
-        suiClient.getBalance({ owner: ownerAddress, coinType: poolInfo.coinTypeB }),
-      ]);
-
-      const gasReserve = BigInt(this.config.gasBudget) * 3n;
-      const isSuiA = this.normalizeCoinType(poolInfo.coinTypeA) === this.normalizeCoinType(SUI_COIN_TYPE);
-      const isSuiB = this.normalizeCoinType(poolInfo.coinTypeB) === this.normalizeCoinType(SUI_COIN_TYPE);
-
-      // When env amounts are configured, use the full post-removal wallet balance
-      // capped to the env amount — matching the behaviour of createInitialPosition.
-      // This ensures the bot always targets the user-specified amounts even when
-      // the position removal delta alone is smaller than the configured limit.
-      //
-      // When no env amount is set, fall back to the safe delta approach (post − pre)
-      // so that pre-existing wallet funds are never consumed unintentionally.
-      let receivedA: bigint;
-      let receivedB: bigint;
-
-      if (this.config.tokenAAmount !== undefined) {
-        const postA = BigInt(postBalA.totalBalance || '0');
-        const envA = BigInt(this.config.tokenAAmount);
-        receivedA = postA < envA ? postA : envA;
-        logger.info('Using TOKEN_A_AMOUNT from env for rebalanced position', {
-          requested: this.config.tokenAAmount,
-          effective: receivedA.toString(),
-          cappedByEnv: postA >= envA,
-        });
-      } else {
-        // Delta = post − pre; clamped to zero for negative values (e.g. SUI gas).
-        receivedA = BigInt(postBalA.totalBalance || '0') - BigInt(preBalA.totalBalance || '0');
-        if (receivedA < 0n) receivedA = 0n;
-      }
-
-      if (this.config.tokenBAmount !== undefined) {
-        const postB = BigInt(postBalB.totalBalance || '0');
-        const envB = BigInt(this.config.tokenBAmount);
-        receivedB = postB < envB ? postB : envB;
-        logger.info('Using TOKEN_B_AMOUNT from env for rebalanced position', {
-          requested: this.config.tokenBAmount,
-          effective: receivedB.toString(),
-          cappedByEnv: postB >= envB,
-        });
-      } else {
-        receivedB = BigInt(postBalB.totalBalance || '0') - BigInt(preBalB.totalBalance || '0');
-        if (receivedB < 0n) receivedB = 0n;
-      }
-
-      // For SUI tokens, further cap the usable amount to (postBalance − gasReserve)
-      // so that subsequent transactions (swap, open-position, add-liquidity) always
-      // have enough SUI to cover fees.
-      if (isSuiA) {
-        const postA = BigInt(postBalA.totalBalance || '0');
-        const maxA = postA > gasReserve ? postA - gasReserve : 0n;
-        if (receivedA > maxA) receivedA = maxA;
-      }
-      if (isSuiB) {
-        const postB = BigInt(postBalB.totalBalance || '0');
-        const maxB = postB > gasReserve ? postB - gasReserve : 0n;
-        if (receivedB > maxB) receivedB = maxB;
-      }
-
-      const balances = { amountA: receivedA.toString(), amountB: receivedB.toString() };
-      logger.info('Tokens received from close_position', {
-        amountA: balances.amountA,
-        amountB: balances.amountB,
-        coinTypeA: poolInfo.coinTypeA,
-        coinTypeB: poolInfo.coinTypeB,
+      // Use the exact env-configured token amounts — never derive from wallet balance
+      // or position removal delta.
+      logger.info('Using env-configured token amounts for rebalanced position', {
+        tokenAAmount: this.config.tokenAAmount,
+        tokenBAmount: this.config.tokenBAmount,
       });
+
+      const balances = {
+        amountA: this.config.tokenAAmount,
+        amountB: this.config.tokenBAmount,
+      };
 
       // Step 3: Swap using Cetus aggregator if needed to reach the correct token ratio.
       const adjusted = await this.swapTokensIfNeeded(
@@ -522,58 +426,6 @@ export class RebalanceService {
       3,
       2000,
     );
-  }
-
-  // ---------------------------------------------------------------------------
-  // Private: check wallet balances
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Read the current wallet balances for both pool tokens.
-   * Called after removing liquidity to determine what tokens are available
-   * before deciding whether and how much to swap.
-   *
-   * When SUI (`0x2::sui::SUI`) is one of the pool tokens, the gas budget is
-   * subtracted from its balance so that subsequent transactions always have
-   * enough SUI available to pay fees.  Without this reservation the add-
-   * liquidity transaction fails with `InsufficientCoinBalance` because the
-   * full SUI balance is passed as a token amount, leaving nothing for gas.
-   */
-  private async getWalletBalances(
-    coinTypeA: string,
-    coinTypeB: string,
-  ): Promise<{ amountA: string; amountB: string }> {
-    const suiClient = this.sdkService.getSuiClient();
-    const ownerAddress = this.sdkService.getAddress();
-
-    const [balA, balB] = await Promise.all([
-      suiClient.getBalance({ owner: ownerAddress, coinType: coinTypeA }),
-      suiClient.getBalance({ owner: ownerAddress, coinType: coinTypeB }),
-    ]);
-
-    // Reserve gas for the three transactions that may execute after this balance
-    // read: (1) optional token swap, (2) open-position NFT, (3) add-liquidity.
-    // Reserving only 1 × gasBudget left insufficient SUI to cover gas for step 2
-    // after step 1 had already consumed up to gasBudget, causing the on-chain
-    // "InsufficientCoinBalance in command 1" error.
-    const gasReserve = BigInt(this.config.gasBudget) * 3n;
-    const isSuiA = this.normalizeCoinType(coinTypeA) === this.normalizeCoinType(SUI_COIN_TYPE);
-    const isSuiB = this.normalizeCoinType(coinTypeB) === this.normalizeCoinType(SUI_COIN_TYPE);
-
-    let amountA = BigInt(balA.totalBalance || '0');
-    let amountB = BigInt(balB.totalBalance || '0');
-
-    if (isSuiA) {
-      amountA = amountA > gasReserve ? amountA - gasReserve : 0n;
-    }
-    if (isSuiB) {
-      amountB = amountB > gasReserve ? amountB - gasReserve : 0n;
-    }
-
-    return {
-      amountA: amountA.toString(),
-      amountB: amountB.toString(),
-    };
   }
 
   // ---------------------------------------------------------------------------

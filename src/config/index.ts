@@ -17,9 +17,9 @@ export interface BotConfig {
   upperTick?: number;
   rangeWidth?: number;
 
-  // Token amounts for zap-in
-  tokenAAmount?: string;
-  tokenBAmount?: string;
+  // Token amounts for zap-in (required — must be set in .env)
+  tokenAAmount: string;
+  tokenBAmount: string;
 
   // Risk management
   maxSlippage: number;
@@ -49,7 +49,11 @@ function getEnvBoolean(key: string, defaultValue: boolean): boolean {
 }
 
 function validateTokenAmount(key: string, value: string | undefined): void {
-  if (value === undefined) return;
+  if (value === undefined || value === '') {
+    throw new Error(
+      `${key} is required and must be a positive integer (base units / MIST). Got: ${value}`,
+    );
+  }
   if (!/^\d+$/.test(value)) {
     throw new Error(
       `${key} must be a positive integer (base units / MIST). Got: ${value}`,
@@ -89,12 +93,12 @@ export function loadConfig(): BotConfig {
     upperTick: getEnvVar('UPPER_TICK', false) ? parseInt(getEnvVar('UPPER_TICK', false)) : undefined,
     rangeWidth: getEnvVar('RANGE_WIDTH', false) ? parseInt(getEnvVar('RANGE_WIDTH', false)) : undefined,
     tokenAAmount: (() => {
-      const v = getEnvVar('TOKEN_A_AMOUNT', false) || undefined;
+      const v = getEnvVar('TOKEN_A_AMOUNT');
       validateTokenAmount('TOKEN_A_AMOUNT', v);
       return v;
     })(),
     tokenBAmount: (() => {
-      const v = getEnvVar('TOKEN_B_AMOUNT', false) || undefined;
+      const v = getEnvVar('TOKEN_B_AMOUNT');
       validateTokenAmount('TOKEN_B_AMOUNT', v);
       return v;
     })(),

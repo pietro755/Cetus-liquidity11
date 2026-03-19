@@ -183,16 +183,7 @@ export class RebalanceService {
         };
       }
 
-      // Use the exact env-configured token amounts — never derive from wallet balance.
-      logger.info('Using env-configured token amounts for initial position', {
-        tokenAAmount: this.config.tokenAAmount,
-        tokenBAmount: this.config.tokenBAmount,
-      });
-
-      const balances = {
-        amountA: this.config.tokenAAmount,
-        amountB: this.config.tokenBAmount,
-      };
+      const balances = await this.getAvailableTokenAmountsForPosition(poolInfo, 'initial position');
 
       // Swap to correct token ratio if needed.
       const adjusted = await this.swapTokensIfNeeded(
@@ -296,17 +287,7 @@ export class RebalanceService {
       // Step 1: Remove liquidity from the out-of-range position.
       await this.removeLiquidity(position.positionId, storedLiquidity, poolInfo);
 
-      // Use the exact env-configured token amounts — never derive from wallet balance
-      // or position removal delta.
-      logger.info('Using env-configured token amounts for rebalanced position', {
-        tokenAAmount: this.config.tokenAAmount,
-        tokenBAmount: this.config.tokenBAmount,
-      });
-
-      const balances = {
-        amountA: this.config.tokenAAmount,
-        amountB: this.config.tokenBAmount,
-      };
+      const balances = await this.getAvailableTokenAmountsForPosition(poolInfo, 'rebalanced position');
 
       // Step 3: Swap using Cetus aggregator if needed to reach the correct token ratio.
       const adjusted = await this.swapTokensIfNeeded(
@@ -370,6 +351,46 @@ export class RebalanceService {
     const lower = Math.floor((currentTick - half) / tickSpacing) * tickSpacing;
     const upper = Math.ceil((currentTick + half) / tickSpacing) * tickSpacing;
     return { lower, upper };
+  }
+
+  private async getAvailableTokenAmountsForPosition(
+    poolInfo: PoolInfo,
+    context: string,
+  ): Promise<{ amountA: string; amountB: string }> {
+    const suiClient = this.sdkService.getSuiClient();
+    const ownerAddress = this.sdkService.getAddress();
+
+    const [walletBalanceA, walletBalanceB] = await Promise.all([
+      suiClient.getBalance({ owner: ownerAddress, coinType: poolInfo.coinTypeA }),
+      suiClient.getBalance({ owner: ownerAddress, coinType: poolInfo.coinTypeB }),
+    ]);
+
+    const availableA = this.minBigInt(walletBalanceA.totalBalance, this.config.tokenAAmount).toString();
+    const availableB = this.minBigInt(walletBalanceB.totalBalance, this.config.tokenBAmount).toString();
+
+    logger.info(`Using wallet balances capped by configured maxima for ${context}`, {
+      walletAmountA: walletBalanceA.totalBalance,
+      walletAmountB: walletBalanceB.totalBalance,
+      configuredAmountA: this.config.tokenAAmount,
+      configuredAmountB: this.config.tokenBAmount,
+      availableAmountA: availableA,
+      availableAmountB: availableB,
+    });
+
+    if (BigInt(availableA) === 0n && BigInt(availableB) === 0n) {
+      throw new Error(`No wallet balances available to open ${context}`);
+    }
+
+    return {
+      amountA: availableA,
+      amountB: availableB,
+    };
+  }
+
+  private minBigInt(a: string, b: string): bigint {
+    const bigA = BigInt(a || '0');
+    const bigB = BigInt(b || '0');
+    return bigA < bigB ? bigA : bigB;
   }
 
   // ---------------------------------------------------------------------------
@@ -702,12 +723,12 @@ export class RebalanceService {
    * Open a new position using an explicit two-step approach:
    *   1. openPositionTransactionPayload        → creates the position NFT
    *   2. createAddLiquidityFixTokenPayload     → deposits only the tokens received
-   *                                              from the removed position
+   *                                              from the wallet-balance-capped swap flow
    *
-   * The token amounts (amountA / amountB) are the pre/post balance deltas computed
-   * in rebalancePosition — they represent exactly what was received when the old
-   * position was closed, never the full wallet balance.  The SDK derives the correct
-   * delta_liquidity from these amounts for the new tick range.
+   * The token amounts (amountA / amountB) are the amounts prepared immediately
+   * before opening: real wallet balances capped by the configured maxima, then
+   * adjusted by swapTokensIfNeeded when a swap is required. The SDK derives the
+   * correct delta_liquidity from these amounts for the new tick range.
    */
   private async openNewPosition(
     poolInfo: PoolInfo,

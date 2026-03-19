@@ -76,12 +76,15 @@ flow in dry-run mode — all without any external network I/O.
 | `CHECK_INTERVAL` | | `60` | Seconds between checks |
 | `LOWER_TICK` | | auto | Lower tick for new position |
 | `UPPER_TICK` | | auto | Upper tick for new position |
+| `TOKEN_A_AMOUNT` | ✅ | — | Maximum token A amount to use, in base units |
+| `TOKEN_B_AMOUNT` | ✅ | — | Maximum token B amount to use, in base units |
 | `MAX_SLIPPAGE` | | `0.01` | Max slippage — must be > 0 and < 1 (i.e. 0–100 % exclusive) |
 | `GAS_BUDGET` | | `50000000` | Gas budget in MIST |
 | `LOG_LEVEL` | | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `DRY_RUN` | | `false` | Simulate without executing |
 
 When `LOWER_TICK` / `UPPER_TICK` are not set, the bot preserves the old position's tick-range width, centred on the current tick.
+Before opening a position, the bot reads the wallet balances on-chain and caps each token to the configured `TOKEN_A_AMOUNT` / `TOKEN_B_AMOUNT` maxima.
 
 ## Rebalance Flow
 

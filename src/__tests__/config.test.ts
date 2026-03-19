@@ -22,8 +22,15 @@ function loadFresh() {
 
 const VALID_KEY = 'a'.repeat(64);
 const VALID_POOL = '0x' + 'b'.repeat(64);
+const VALID_TOKEN_A = '1000000';
+const VALID_TOKEN_B = '500000';
 
 describe('loadConfig – network', () => {
+  beforeEach(() => {
+    process.env.TOKEN_A_AMOUNT = VALID_TOKEN_A;
+    process.env.TOKEN_B_AMOUNT = VALID_TOKEN_B;
+  });
+
   it('defaults to mainnet when NETWORK is not set', () => {
     process.env.PRIVATE_KEY = VALID_KEY;
     process.env.POOL_ADDRESS = VALID_POOL;
@@ -68,6 +75,7 @@ describe('loadConfig – required variables', () => {
     delete process.env.PRIVATE_KEY;
 
     // Module-level loadConfig() runs on require(); error is thrown there.
+    // PRIVATE_KEY is loaded before TOKEN_A/B_AMOUNT so the error is for PRIVATE_KEY.
     expect(() => loadFresh()).toThrow(/PRIVATE_KEY/);
   });
 
@@ -77,12 +85,32 @@ describe('loadConfig – required variables', () => {
 
     expect(() => loadFresh()).toThrow(/POOL_ADDRESS/);
   });
+
+  it('throws when TOKEN_A_AMOUNT is missing', () => {
+    process.env.PRIVATE_KEY = VALID_KEY;
+    process.env.POOL_ADDRESS = VALID_POOL;
+    process.env.TOKEN_B_AMOUNT = VALID_TOKEN_B;
+    delete process.env.TOKEN_A_AMOUNT;
+
+    expect(() => loadFresh()).toThrow(/TOKEN_A_AMOUNT/);
+  });
+
+  it('throws when TOKEN_B_AMOUNT is missing', () => {
+    process.env.PRIVATE_KEY = VALID_KEY;
+    process.env.POOL_ADDRESS = VALID_POOL;
+    process.env.TOKEN_A_AMOUNT = VALID_TOKEN_A;
+    delete process.env.TOKEN_B_AMOUNT;
+
+    expect(() => loadFresh()).toThrow(/TOKEN_B_AMOUNT/);
+  });
 });
 
 describe('loadConfig – optional numeric & boolean variables', () => {
   beforeEach(() => {
     process.env.PRIVATE_KEY = VALID_KEY;
     process.env.POOL_ADDRESS = VALID_POOL;
+    process.env.TOKEN_A_AMOUNT = VALID_TOKEN_A;
+    process.env.TOKEN_B_AMOUNT = VALID_TOKEN_B;
   });
 
   it('uses CHECK_INTERVAL from env', () => {
@@ -156,8 +184,8 @@ describe('loadConfig – TOKEN_A_AMOUNT / TOKEN_B_AMOUNT validation', () => {
   beforeEach(() => {
     process.env.PRIVATE_KEY = VALID_KEY;
     process.env.POOL_ADDRESS = VALID_POOL;
-    delete process.env.TOKEN_A_AMOUNT;
-    delete process.env.TOKEN_B_AMOUNT;
+    process.env.TOKEN_A_AMOUNT = VALID_TOKEN_A;
+    process.env.TOKEN_B_AMOUNT = VALID_TOKEN_B;
   });
 
   it('accepts a valid positive integer for TOKEN_A_AMOUNT', () => {
@@ -172,14 +200,14 @@ describe('loadConfig – TOKEN_A_AMOUNT / TOKEN_B_AMOUNT validation', () => {
     expect(loadConfig().tokenBAmount).toBe('500000');
   });
 
-  it('leaves tokenAAmount undefined when TOKEN_A_AMOUNT is not set', () => {
-    const { loadConfig } = loadFresh();
-    expect(loadConfig().tokenAAmount).toBeUndefined();
+  it('throws when TOKEN_A_AMOUNT is not set', () => {
+    delete process.env.TOKEN_A_AMOUNT;
+    expect(() => loadFresh()).toThrow(/TOKEN_A_AMOUNT/);
   });
 
-  it('leaves tokenBAmount undefined when TOKEN_B_AMOUNT is not set', () => {
-    const { loadConfig } = loadFresh();
-    expect(loadConfig().tokenBAmount).toBeUndefined();
+  it('throws when TOKEN_B_AMOUNT is not set', () => {
+    delete process.env.TOKEN_B_AMOUNT;
+    expect(() => loadFresh()).toThrow(/TOKEN_B_AMOUNT/);
   });
 
   it('rejects a non-numeric TOKEN_A_AMOUNT', () => {
@@ -228,6 +256,8 @@ describe('loadConfig – maxSlippage safety guard', () => {
     process.env.PRIVATE_KEY = VALID_KEY;
     process.env.POOL_ADDRESS = VALID_POOL;
     process.env.NETWORK = 'mainnet';
+    process.env.TOKEN_A_AMOUNT = VALID_TOKEN_A;
+    process.env.TOKEN_B_AMOUNT = VALID_TOKEN_B;
   });
 
   it('accepts the default slippage of 0.01 (1 %)', () => {

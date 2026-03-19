@@ -24,6 +24,8 @@ function makeConfig(overrides: Partial<BotConfig> = {}): BotConfig {
     gasBudget: 50_000_000,
     logLevel: 'info',
     verboseLogs: false,
+    tokenAAmount: '1000000',
+    tokenBAmount: '500000',
     ...overrides,
   };
 }

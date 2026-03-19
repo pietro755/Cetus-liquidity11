@@ -482,29 +482,28 @@ export class RebalanceService {
         return { amountA, amountB }; // only B (or nothing) — no swap needed
       }
     } else {
-      // In-range position needs both tokens.
-      if (bigA > 0n && bigB > 0n) {
-        // Both tokens available — no swap needed; the fix_amount_a bottleneck
-        // logic in openNewPosition will handle the ratio correctly.
-        logger.info('Both tokens available — no swap needed');
-        return { amountA, amountB };
-      }
-      // One token is zero — compute the CLMM-optimal swap amount so the
-      // resulting token ratio exactly matches what the target tick range
-      // requires at the current price.  Swapping an arbitrary "half" of the
-      // available token leaves the wrong ratio for asymmetric ranges, causing
-      // the non-bottleneck token to be partially unused and the new position's
-      // delta_liquidity to fall short of the closed position's liquidity.
+      // In-range position needs both tokens in the correct ratio.
+      // Always compute the CLMM-optimal swap even when both tokens are already
+      // available.  Relying on fix_amount_a alone leaves the excess token unused
+      // in the wallet; swapping to the correct ratio first maximises the liquidity
+      // that can be deposited.
       //
-      // Derivation (first-order, ignoring price impact and fees):
+      // Two-token CLMM-optimal swap formula (first-order, ignoring price impact
+      // and fees).  The single-token formulae below are special cases of this
+      // when one amount is zero.
+      //
       //   Let sqrtP, sqrtPa, sqrtPb be Q64.64 sqrt prices.
-      //   Required ratio: reqA/reqB = (sqrtPb−sqrtP)·2^128 /
-      //                               (sqrtP·sqrtPb·(sqrtP−sqrtPa))
+      //   D = sqrtPb·(sqrtP−sqrtPa) + sqrtP·(sqrtPb−sqrtP)
       //
-      //   Shared denominator: D = sqrtPb·(sqrtP−sqrtPa) + sqrtP·(sqrtPb−sqrtP)
+      //   A is the bottleneck when: bigA·sqrtP·sqrtPb·(sqrtP−sqrtPa) ≤ bigB·2^128·(sqrtPb−sqrtP)
       //
-      //   A→B optimal swap: amount = bigA · sqrtPb · (sqrtP−sqrtPa) / D
-      //   B→A optimal swap: amount = bigB · sqrtP  · (sqrtPb−sqrtP) / D
+      //   If B is excess (A is bottleneck) → swap B→A:
+      //     S_B = sqrtP · [bigB·(sqrtPb−sqrtP)·2^128 − bigA·sqrtP·sqrtPb·(sqrtP−sqrtPa)]
+      //           / (2^128 · D)
+      //
+      //   If A is excess (B is bottleneck) → swap A→B:
+      //     S_A = [bigA·sqrtPb·sqrtP·(sqrtP−sqrtPa) − bigB·(sqrtPb−sqrtP)·2^128]
+      //           / (D · sqrtP)
       //
       // Falls back to the half-swap heuristic if the denominator is zero (e.g.
       // degenerate range) or the sqrt price is inconsistent with the tick bounds.
@@ -520,14 +519,32 @@ export class RebalanceService {
         // Degenerate / inconsistent data — fall back to the half heuristic.
         if (bigA > 0n) { a2b = true;  swapAmount = bigA / 2n; }
         else            { a2b = false; swapAmount = bigB / 2n; }
-      } else if (bigA > 0n) {
-        a2b = true;
-        swapAmount = bigA * sqrtPbCalc * (sqrtPBig - sqrtPaCalc) / denominator;
       } else {
-        a2b = false;
-        swapAmount = bigB * sqrtPBig * (sqrtPbCalc - sqrtPBig) / denominator;
+        const TWO_128 = 2n ** 128n;
+        // Determine which token is in excess by comparing the liquidity each
+        // token can provide at the current price.
+        const aIsBottleneck =
+          bigA * sqrtPBig * sqrtPbCalc * (sqrtPBig - sqrtPaCalc) <=
+          bigB * TWO_128 * (sqrtPbCalc - sqrtPBig);
+
+        if (aIsBottleneck) {
+          // B is the excess token → swap B→A.
+          a2b = false;
+          swapAmount =
+            sqrtPBig *
+            (bigB * (sqrtPbCalc - sqrtPBig) * TWO_128 -
+             bigA * sqrtPBig * sqrtPbCalc * (sqrtPBig - sqrtPaCalc)) /
+            (TWO_128 * denominator);
+        } else {
+          // A is the excess token → swap A→B.
+          a2b = true;
+          swapAmount =
+            (bigA * sqrtPbCalc * sqrtPBig * (sqrtPBig - sqrtPaCalc) -
+             bigB * (sqrtPbCalc - sqrtPBig) * TWO_128) /
+            (denominator * sqrtPBig);
+        }
       }
-      if (swapAmount === 0n) return { amountA, amountB };
+      if (swapAmount <= 0n) return { amountA, amountB };
     }
 
     logger.info('Swapping tokens to correct ratio via Cetus aggregator', {

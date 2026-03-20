@@ -330,8 +330,7 @@ describe('rebalance – live path uses fix-token add-liquidity', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
     } as any;
 
     // Mock transaction stubs
@@ -435,8 +434,7 @@ describe('rebalance – step 2 retries on "not available for consumption"', () =
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -514,8 +512,7 @@ describe('rebalance – openNewPosition input validation', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
       ...configOverride,
     } as any;
 
@@ -555,8 +552,7 @@ describe('rebalance – openNewPosition input validation', () => {
       maxSlippage: 0.01,
       lowerTick: 1.5,
       upperTick: 600,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
     } as any;
 
     const svc = new RebalanceService(sdkService, monitor, config);
@@ -574,8 +570,7 @@ describe('rebalance – openNewPosition input validation', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600.9,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
     } as any;
 
     const svc = new RebalanceService(sdkService, monitor, config);
@@ -600,8 +595,7 @@ describe('rebalance – openNewPosition input validation', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
     } as any;
     const mockTxStub = { setGasBudget: jest.fn() };
     const successEffect = { status: { status: 'success' } };
@@ -672,8 +666,7 @@ describe('rebalance – position object verification before add-liquidity', () =
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
     } as any;
     const mockTxStub = { setGasBudget: jest.fn() };
     const successEffect = { status: { status: 'success' } };
@@ -798,8 +791,7 @@ describe('rebalance – position object verification before add-liquidity', () =
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
     } as any;
     const mockTxStub = { setGasBudget: jest.fn() };
     const successEffect = { status: { status: 'success' } };
@@ -869,8 +861,7 @@ describe('rebalance – position object verification before add-liquidity', () =
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
     } as any;
     const mockTxStub = { setGasBudget: jest.fn() };
     const successEffect = { status: { status: 'success' } };
@@ -947,8 +938,8 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
     currentSqrtPrice: string,
     tickLower: number,
     tickUpper: number,
-    tokenAmountA: string,
-    tokenAmountB: string,
+    walletAmountA: string,
+    walletAmountB: string,
   ): Promise<{ fix_amount_a: boolean }> {
     process.env.DRY_RUN = 'false';
 
@@ -971,8 +962,7 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
       maxSlippage: 0.01,
       lowerTick: tickLower,
       upperTick: tickUpper,
-      tokenAAmount: tokenAmountA,
-      tokenBAmount: tokenAmountB,
+      totalUsd: '999999999999999', // large enough to not trigger scaling
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -1003,7 +993,8 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
 
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
-      getBalance: jest.fn().mockResolvedValue('999999999'),
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? walletAmountA : walletAmountB)),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
@@ -1104,8 +1095,7 @@ describe('rebalance – both tokens present with out-of-range new position trigg
       maxSlippage: 0.01,
       lowerTick: tickLower,
       upperTick: tickUpper,
-      tokenAAmount: tokenAmountA,
-      tokenBAmount: tokenAmountB,
+      totalUsd: '999999999999999', // large enough to not trigger scaling
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -1161,7 +1151,8 @@ describe('rebalance – both tokens present with out-of-range new position trigg
 
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
-      getBalance: jest.fn().mockResolvedValue('999999999'),
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? tokenAmountA : tokenAmountB)),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
@@ -1250,8 +1241,7 @@ describe('rebalance – CLMM-optimal swap amount for in-range single-token case'
       maxSlippage: 0.01,
       lowerTick: tickLower,
       upperTick: tickUpper,
-      tokenAAmount: tokenAmountA,
-      tokenBAmount: tokenAmountB,
+      totalUsd: '999999999999999', // large enough to not trigger scaling
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -1306,7 +1296,8 @@ describe('rebalance – CLMM-optimal swap amount for in-range single-token case'
 
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
-      getBalance: jest.fn().mockResolvedValue('999999999'),
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? tokenAmountA : tokenAmountB)),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
@@ -1448,7 +1439,7 @@ describe('rebalance – CLMM-optimal swap amount for in-range single-token case'
 describe('rebalance – configured amounts capped by wallet balance', () => {
   afterEach(() => { delete process.env.DRY_RUN; });
 
-  it('uses configured amounts for rebalanced position when wallet balance covers them', async () => {
+  it('uses wallet amounts for rebalanced position when wallet value is below TOTAL_USD', async () => {
     process.env.DRY_RUN = 'false';
 
     const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
@@ -1462,8 +1453,7 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '2000000',
-      tokenBAmount: '3000000',
+      totalUsd: '10000000', // large enough that wallet value is below budget
     } as any;
     const mockTxStub = { setGasBudget: jest.fn() };
     const successEffect = { status: { status: 'success' } };
@@ -1493,7 +1483,8 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
 
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
-      getBalance: jest.fn().mockResolvedValue('999999999'),
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? '2000000' : '3000000')),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
@@ -1510,7 +1501,7 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
       amount_a: string; amount_b: string;
     };
 
-    // With sufficient wallet balances, the configured amounts pass through unchanged.
+    // Wallet value (≈3000000 tokenB) is below TOTAL_USD (10000000) — full wallet balances used.
     expect(callArgs.amount_a).toBe('2000000');
     expect(callArgs.amount_b).toBe('3000000');
 
@@ -1521,7 +1512,7 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
 
-  it('caps rebalanced position amounts to the wallet balances before opening', async () => {
+  it('uses full wallet balances when wallet value is below TOTAL_USD', async () => {
     process.env.DRY_RUN = 'false';
 
     const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
@@ -1535,8 +1526,7 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '2000000',
-      tokenBAmount: '3000000',
+      totalUsd: '10000000', // large enough that wallet value (≈2500000) is below budget
     } as any;
     const mockTxStub = { setGasBudget: jest.fn() };
     const successEffect = { status: { status: 'success' } };
@@ -1582,11 +1572,12 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0] as {
       amount_a: string; amount_b: string;
     };
+    // Wallet value (≈2500000 tokenB) < TOTAL_USD (10000000) → full wallet balances used.
     expect(callArgs.amount_a).toBe('1500000');
     expect(callArgs.amount_b).toBe('2500000');
   });
 
-  it('uses the same env amounts on every rebalance (deterministic)', async () => {
+  it('produces identical amounts across multiple rebalances (deterministic)', async () => {
     // Run two rebalances in sequence. Both must use the identical env amounts,
     // proving the bot is deterministic and not accumulating state.
     process.env.DRY_RUN = 'false';
@@ -1602,8 +1593,7 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '1500000',
-      tokenBAmount: '2500000',
+      totalUsd: '10000000', // large enough that wallet value is below budget
     } as any;
     const mockTxStub = { setGasBudget: jest.fn() };
     const successEffect = { status: { status: 'success' } };
@@ -1634,7 +1624,8 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     const mockSuiClient1 = makeSuccessfulRun();
     const sdkService1 = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
-      getBalance: jest.fn().mockResolvedValue('999999999'),
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? '1500000' : '2500000')),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient1),
@@ -1648,7 +1639,8 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     const mockSuiClient2 = makeSuccessfulRun();
     const sdkService2 = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
-      getBalance: jest.fn().mockResolvedValue('999999999'),
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? '1500000' : '2500000')),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient2),
@@ -1795,12 +1787,12 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
    * Helper that sets up a live (non-dry-run) createInitialPosition scenario.
    * Returns the mock SDK's createAddLiquidityFixTokenPayload for inspection.
    *
-    * tokenAAmount and tokenBAmount are the configured maximum amounts. The live
-    * code caps them by wallet balance before swapping/opening.
+    * walletAmountA and walletAmountB are the wallet balances for each token.
+    * TOTAL_USD is set large enough that no scaling is applied.
    */
   function makeInitialPositionScenario(opts: {
-    tokenAAmount: string;
-    tokenBAmount: string;
+    walletAmountA: string;
+    walletAmountB: string;
   }) {
     process.env.DRY_RUN = 'false';
 
@@ -1813,8 +1805,7 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: opts.tokenAAmount,
-      tokenBAmount: opts.tokenBAmount,
+      totalUsd: '10000000', // large enough that wallet value is below budget
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -1851,7 +1842,8 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
 
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
-      getBalance: jest.fn().mockResolvedValue('999999999'),
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? opts.walletAmountA : opts.walletAmountB)),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
@@ -1860,9 +1852,9 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
     return { pool, monitor, config, sdkService, createAddLiquidityFixTokenPayload, mockSuiClient };
   }
 
-  it('uses configured TOKEN_A_AMOUNT for initial position when wallet balance covers it', async () => {
+  it('uses wallet token A balance for initial position when wallet value is below TOTAL_USD', async () => {
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload, mockSuiClient } =
-      makeInitialPositionScenario({ tokenAAmount: '2000000', tokenBAmount: '1000000' });
+      makeInitialPositionScenario({ walletAmountA: '2000000', walletAmountB: '1000000' });
 
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
@@ -1871,7 +1863,7 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
     expect(result!.success).toBe(true);
 
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // amount_a must equal the configured value when wallet balance is sufficient.
+    // amount_a must equal the wallet balance when wallet value < TOTAL_USD.
     expect(callArgs.amount_a).toBe('2000000');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
@@ -1880,9 +1872,9 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
 
-  it('uses configured TOKEN_B_AMOUNT for initial position when wallet balance covers it', async () => {
+  it('uses wallet token B balance for initial position when wallet value is below TOTAL_USD', async () => {
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload, mockSuiClient } =
-      makeInitialPositionScenario({ tokenAAmount: '1000000', tokenBAmount: '1500000' });
+      makeInitialPositionScenario({ walletAmountA: '1000000', walletAmountB: '1500000' });
 
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
@@ -1891,7 +1883,7 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
     expect(result!.success).toBe(true);
 
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // amount_b must equal the configured value when wallet balance is sufficient.
+    // amount_b must equal the wallet balance when wallet value < TOTAL_USD.
     expect(callArgs.amount_b).toBe('1500000');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
@@ -1900,9 +1892,9 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
 
-  it('uses large configured amounts when wallet balance is sufficient', async () => {
+  it('uses full wallet balances when TOTAL_USD exceeds wallet value', async () => {
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
-      makeInitialPositionScenario({ tokenAAmount: '9999999', tokenBAmount: '9999999' });
+      makeInitialPositionScenario({ walletAmountA: '9999999', walletAmountB: '9999999' });
 
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
@@ -1911,7 +1903,7 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
     expect(result!.success).toBe(true);
 
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // Exact configured values are passed through when wallet balance is high enough.
+    // Full wallet balances are passed through when wallet value is below TOTAL_USD.
     expect(callArgs.amount_a).toBe('9999999');
     expect(callArgs.amount_b).toBe('9999999');
   });
@@ -1929,11 +1921,12 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
    * has an out-of-range position. Returns the mock SDK's
    * createAddLiquidityFixTokenPayload for assertion.
    *
-    * tokenAAmount and tokenBAmount are configured maximum amounts.
+    * walletAmountA and walletAmountB are the wallet balances for each token.
+    * TOTAL_USD is set large enough that no scaling is applied.
    */
   function makeRebalanceEnvAmountScenario(opts: {
-    tokenAAmount: string;
-    tokenBAmount: string;
+    walletAmountA: string;
+    walletAmountB: string;
   }) {
     process.env.DRY_RUN = 'false';
 
@@ -1949,8 +1942,7 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: opts.tokenAAmount,
-      tokenBAmount: opts.tokenBAmount,
+      totalUsd: '10000000', // large enough that wallet value is below budget
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -1985,7 +1977,8 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
 
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
-      getBalance: jest.fn().mockResolvedValue('999999999'),
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? opts.walletAmountA : opts.walletAmountB)),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
@@ -1994,9 +1987,9 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
     return { monitor, config, sdkService, createAddLiquidityFixTokenPayload, mockSuiClient };
   }
 
-  it('uses configured TOKEN_A_AMOUNT during rebalance when wallet balance covers it', async () => {
+  it('uses wallet token A balance during rebalance when wallet value is below TOTAL_USD', async () => {
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload, mockSuiClient } =
-      makeRebalanceEnvAmountScenario({ tokenAAmount: '2000000', tokenBAmount: '3000000' });
+      makeRebalanceEnvAmountScenario({ walletAmountA: '2000000', walletAmountB: '3000000' });
 
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
@@ -2005,7 +1998,7 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
     expect(result!.success).toBe(true);
 
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // With sufficient wallet balances, the configured amount passes through unchanged.
+    // Wallet value (≈3000000 tokenB) < TOTAL_USD (10000000) → full wallet balances used.
     expect(callArgs.amount_a).toBe('2000000');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
@@ -2014,9 +2007,9 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
 
-  it('uses configured TOKEN_B_AMOUNT during rebalance when wallet balance covers it', async () => {
+  it('uses wallet token B balance during rebalance when wallet value is below TOTAL_USD', async () => {
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
-      makeRebalanceEnvAmountScenario({ tokenAAmount: '1000000', tokenBAmount: '1500000' });
+      makeRebalanceEnvAmountScenario({ walletAmountA: '1000000', walletAmountB: '1500000' });
 
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
@@ -2025,13 +2018,13 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
     expect(result!.success).toBe(true);
 
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // Must use the configured amount when wallet balance is sufficient.
+    // Wallet value (≈1500000 tokenB) < TOTAL_USD (10000000) → full wallet balances used.
     expect(callArgs.amount_b).toBe('1500000');
   });
 
-  it('uses large configured amounts during rebalance when wallet balance is sufficient', async () => {
+  it('uses full wallet balances during rebalance when TOTAL_USD exceeds wallet value', async () => {
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
-      makeRebalanceEnvAmountScenario({ tokenAAmount: '9999999', tokenBAmount: '9999999' });
+      makeRebalanceEnvAmountScenario({ walletAmountA: '9999999', walletAmountB: '9999999' });
 
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
@@ -2040,15 +2033,15 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
     expect(result!.success).toBe(true);
 
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // Both configured amounts must be used exactly when wallet balance is high enough.
+    // Full wallet balances pass through when wallet value is below TOTAL_USD.
     expect(callArgs.amount_a).toBe('9999999');
     expect(callArgs.amount_b).toBe('9999999');
   });
 
-  it('uses same env amounts across multiple rebalances (deterministic)', async () => {
-    // Both rebalances must produce identical amounts from env config.
+  it('produces identical amounts across multiple rebalances (deterministic)', async () => {
+    // Both rebalances must produce identical amounts.
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
-      makeRebalanceEnvAmountScenario({ tokenAAmount: '4000000', tokenBAmount: '6000000' });
+      makeRebalanceEnvAmountScenario({ walletAmountA: '4000000', walletAmountB: '6000000' });
 
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
@@ -2079,8 +2072,7 @@ describe('wallet balance checks before opening a new position', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -2166,8 +2158,7 @@ describe('wallet balance checks before opening a new position', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -2246,8 +2237,7 @@ describe('wallet balance checks before opening a new position', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -2365,8 +2355,7 @@ describe('wallet balance checks before opening a new position', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      tokenAAmount: '1000000',
-      tokenBAmount: '1000000',
+      totalUsd: '1000000',
     } as any;
 
     const sdkService = {

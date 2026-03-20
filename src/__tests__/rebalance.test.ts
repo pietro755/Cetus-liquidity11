@@ -2062,6 +2062,98 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
 describe('wallet balance checks before opening a new position', () => {
   afterEach(() => { delete process.env.DRY_RUN; });
 
+  it('uses wallet balances to trigger the required swap for a rebalanced position', async () => {
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '1000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+    const createSwapTransactionPayload = jest.fn().mockReturnValue(mockTxStub);
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+
+    const mockSdk = {
+      RouterV2: {
+        getBestRouter: jest.fn().mockRejectedValue(new Error('aggregator unavailable')),
+      },
+      Swap: {
+        createSwapTransactionPayload,
+      },
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    let getBalanceCallCount = 0;
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xswap',
+          balanceChanges: [],
+        })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 2) {
+          return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '800000' : '0' });
+        }
+        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '400000' : '350000' });
+      }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? '800000' : '0')),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
+    expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
+    expect(createSwapTransactionPayload).toHaveBeenCalledTimes(1);
+
+    const swapArgs = createSwapTransactionPayload.mock.calls[0][0] as { a2b: boolean; amount: string };
+    expect(swapArgs.a2b).toBe(true);
+    expect(BigInt(swapArgs.amount)).toBeGreaterThan(0n);
+
+    const addLiquidityArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0] as {
+      amount_a: string; amount_b: string;
+    };
+    expect(addLiquidityArgs.amount_a).toBe('400000');
+    expect(addLiquidityArgs.amount_b).toBe('350000');
+  });
+
   it('uses wallet balances to trigger the required swap for an initial position', async () => {
     process.env.DRY_RUN = 'false';
 

@@ -22,13 +22,11 @@ function loadFresh() {
 
 const VALID_KEY = 'a'.repeat(64);
 const VALID_POOL = '0x' + 'b'.repeat(64);
-const VALID_TOKEN_A = '1000000';
-const VALID_TOKEN_B = '500000';
+const VALID_TOTAL_USD = '1000000';
 
 describe('loadConfig – network', () => {
   beforeEach(() => {
-    process.env.TOKEN_A_AMOUNT = VALID_TOKEN_A;
-    process.env.TOKEN_B_AMOUNT = VALID_TOKEN_B;
+    process.env.TOTAL_USD = VALID_TOTAL_USD;
   });
 
   it('defaults to mainnet when NETWORK is not set', () => {
@@ -75,7 +73,7 @@ describe('loadConfig – required variables', () => {
     delete process.env.PRIVATE_KEY;
 
     // Module-level loadConfig() runs on require(); error is thrown there.
-    // PRIVATE_KEY is loaded before TOKEN_A/B_AMOUNT so the error is for PRIVATE_KEY.
+    // PRIVATE_KEY is loaded before TOTAL_USD so the error is for PRIVATE_KEY.
     expect(() => loadFresh()).toThrow(/PRIVATE_KEY/);
   });
 
@@ -86,22 +84,12 @@ describe('loadConfig – required variables', () => {
     expect(() => loadFresh()).toThrow(/POOL_ADDRESS/);
   });
 
-  it('throws when TOKEN_A_AMOUNT is missing', () => {
+  it('throws when TOTAL_USD is missing', () => {
     process.env.PRIVATE_KEY = VALID_KEY;
     process.env.POOL_ADDRESS = VALID_POOL;
-    process.env.TOKEN_B_AMOUNT = VALID_TOKEN_B;
-    delete process.env.TOKEN_A_AMOUNT;
+    delete process.env.TOTAL_USD;
 
-    expect(() => loadFresh()).toThrow(/TOKEN_A_AMOUNT/);
-  });
-
-  it('throws when TOKEN_B_AMOUNT is missing', () => {
-    process.env.PRIVATE_KEY = VALID_KEY;
-    process.env.POOL_ADDRESS = VALID_POOL;
-    process.env.TOKEN_A_AMOUNT = VALID_TOKEN_A;
-    delete process.env.TOKEN_B_AMOUNT;
-
-    expect(() => loadFresh()).toThrow(/TOKEN_B_AMOUNT/);
+    expect(() => loadFresh()).toThrow(/TOTAL_USD/);
   });
 });
 
@@ -109,8 +97,7 @@ describe('loadConfig – optional numeric & boolean variables', () => {
   beforeEach(() => {
     process.env.PRIVATE_KEY = VALID_KEY;
     process.env.POOL_ADDRESS = VALID_POOL;
-    process.env.TOKEN_A_AMOUNT = VALID_TOKEN_A;
-    process.env.TOKEN_B_AMOUNT = VALID_TOKEN_B;
+    process.env.TOTAL_USD = VALID_TOTAL_USD;
   });
 
   it('uses CHECK_INTERVAL from env', () => {
@@ -180,74 +167,48 @@ describe('loadConfig – optional numeric & boolean variables', () => {
 // TOKEN_A_AMOUNT / TOKEN_B_AMOUNT validation
 // ---------------------------------------------------------------------------
 
-describe('loadConfig – TOKEN_A_AMOUNT / TOKEN_B_AMOUNT validation', () => {
+describe('loadConfig – TOTAL_USD validation', () => {
   beforeEach(() => {
     process.env.PRIVATE_KEY = VALID_KEY;
     process.env.POOL_ADDRESS = VALID_POOL;
-    process.env.TOKEN_A_AMOUNT = VALID_TOKEN_A;
-    process.env.TOKEN_B_AMOUNT = VALID_TOKEN_B;
+    process.env.TOTAL_USD = VALID_TOTAL_USD;
   });
 
-  it('accepts a valid positive integer for TOKEN_A_AMOUNT', () => {
-    process.env.TOKEN_A_AMOUNT = '1000000';
+  it('accepts a valid positive integer for TOTAL_USD', () => {
+    process.env.TOTAL_USD = '1000000';
     const { loadConfig } = loadFresh();
-    expect(loadConfig().tokenAAmount).toBe('1000000');
+    expect(loadConfig().totalUsd).toBe('1000000');
   });
 
-  it('accepts a valid positive integer for TOKEN_B_AMOUNT', () => {
-    process.env.TOKEN_B_AMOUNT = '500000';
+  it('accepts a large value for TOTAL_USD', () => {
+    process.env.TOTAL_USD = '100000000000';
     const { loadConfig } = loadFresh();
-    expect(loadConfig().tokenBAmount).toBe('500000');
+    expect(loadConfig().totalUsd).toBe('100000000000');
   });
 
-  it('throws when TOKEN_A_AMOUNT is not set', () => {
-    delete process.env.TOKEN_A_AMOUNT;
-    expect(() => loadFresh()).toThrow(/TOKEN_A_AMOUNT/);
+  it('throws when TOTAL_USD is not set', () => {
+    delete process.env.TOTAL_USD;
+    expect(() => loadFresh()).toThrow(/TOTAL_USD/);
   });
 
-  it('throws when TOKEN_B_AMOUNT is not set', () => {
-    delete process.env.TOKEN_B_AMOUNT;
-    expect(() => loadFresh()).toThrow(/TOKEN_B_AMOUNT/);
+  it('rejects a non-numeric TOTAL_USD', () => {
+    process.env.TOTAL_USD = 'abc';
+    expect(() => loadFresh()).toThrow(/TOTAL_USD/);
   });
 
-  it('rejects a non-numeric TOKEN_A_AMOUNT', () => {
-    process.env.TOKEN_A_AMOUNT = 'abc';
-    expect(() => loadFresh()).toThrow(/TOKEN_A_AMOUNT/);
+  it('rejects TOTAL_USD of zero', () => {
+    process.env.TOTAL_USD = '0';
+    expect(() => loadFresh()).toThrow(/TOTAL_USD/);
   });
 
-  it('rejects a non-numeric TOKEN_B_AMOUNT', () => {
-    process.env.TOKEN_B_AMOUNT = 'xyz';
-    expect(() => loadFresh()).toThrow(/TOKEN_B_AMOUNT/);
+  it('rejects a negative TOTAL_USD', () => {
+    process.env.TOTAL_USD = '-500';
+    expect(() => loadFresh()).toThrow(/TOTAL_USD/);
   });
 
-  it('rejects TOKEN_A_AMOUNT of zero', () => {
-    process.env.TOKEN_A_AMOUNT = '0';
-    expect(() => loadFresh()).toThrow(/TOKEN_A_AMOUNT/);
-  });
-
-  it('rejects TOKEN_B_AMOUNT of zero', () => {
-    process.env.TOKEN_B_AMOUNT = '0';
-    expect(() => loadFresh()).toThrow(/TOKEN_B_AMOUNT/);
-  });
-
-  it('rejects a negative TOKEN_A_AMOUNT', () => {
-    process.env.TOKEN_A_AMOUNT = '-500';
-    expect(() => loadFresh()).toThrow(/TOKEN_A_AMOUNT/);
-  });
-
-  it('rejects a negative TOKEN_B_AMOUNT', () => {
-    process.env.TOKEN_B_AMOUNT = '-1';
-    expect(() => loadFresh()).toThrow(/TOKEN_B_AMOUNT/);
-  });
-
-  it('rejects a decimal TOKEN_A_AMOUNT', () => {
-    process.env.TOKEN_A_AMOUNT = '1.5';
-    expect(() => loadFresh()).toThrow(/TOKEN_A_AMOUNT/);
-  });
-
-  it('rejects a decimal TOKEN_B_AMOUNT', () => {
-    process.env.TOKEN_B_AMOUNT = '2.5';
-    expect(() => loadFresh()).toThrow(/TOKEN_B_AMOUNT/);
+  it('rejects a decimal TOTAL_USD', () => {
+    process.env.TOTAL_USD = '1.5';
+    expect(() => loadFresh()).toThrow(/TOTAL_USD/);
   });
 });
 
@@ -256,8 +217,7 @@ describe('loadConfig – maxSlippage safety guard', () => {
     process.env.PRIVATE_KEY = VALID_KEY;
     process.env.POOL_ADDRESS = VALID_POOL;
     process.env.NETWORK = 'mainnet';
-    process.env.TOKEN_A_AMOUNT = VALID_TOKEN_A;
-    process.env.TOKEN_B_AMOUNT = VALID_TOKEN_B;
+    process.env.TOTAL_USD = VALID_TOTAL_USD;
   });
 
   it('accepts the default slippage of 0.01 (1 %)', () => {

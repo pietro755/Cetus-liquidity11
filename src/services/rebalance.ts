@@ -984,14 +984,36 @@ export class RebalanceService {
       this.sdkService.getBalance(poolInfo.coinTypeB),
     ]);
 
-    const amountA = this.minAmount(walletBalanceA, this.config.tokenAAmount);
-    const amountB = this.minAmount(walletBalanceB, this.config.tokenBAmount);
+    const bigA = BigInt(walletBalanceA);
+    const bigB = BigInt(walletBalanceB);
+    const totalUsd = BigInt(this.config.totalUsd);
+
+    // Compute the total wallet value expressed in tokenB base units using the
+    // pool's current sqrt price: price of tokenA in tokenB = sqrtPrice^2 / 2^128.
+    const sqrtP = BigInt(poolInfo.currentSqrtPrice);
+    const TWO_128 = 2n ** 128n;
+    const valueAInB = sqrtP === 0n ? 0n : (bigA * sqrtP * sqrtP) / TWO_128;
+    const totalValue = valueAInB + bigB;
+
+    let amountA: string;
+    let amountB: string;
+
+    if (totalValue === 0n || totalValue <= totalUsd) {
+      // Either we cannot compute a meaningful total (price is too small to
+      // produce non-zero bigint arithmetic) or the wallet value already fits
+      // within the TOTAL_USD budget — use full wallet balances in both cases.
+      amountA = walletBalanceA;
+      amountB = walletBalanceB;
+    } else {
+      // Scale down both token amounts proportionally to stay within TOTAL_USD.
+      amountA = (bigA * totalUsd / totalValue).toString();
+      amountB = (bigB * totalUsd / totalValue).toString();
+    }
 
     logger.info(`Checked wallet balances for ${positionContext}`, {
       walletBalanceA,
       walletBalanceB,
-      configuredAmountA: this.config.tokenAAmount,
-      configuredAmountB: this.config.tokenBAmount,
+      totalUsd: this.config.totalUsd,
       usableAmountA: amountA,
       usableAmountB: amountB,
     });
@@ -1109,9 +1131,5 @@ export class RebalanceService {
   /** Normalise coin type for comparison (lowercased, leading zeros stripped). */
   private normalizeCoinType(ct: string): string {
     return ct.toLowerCase().replace(/^0x0+/, '0x');
-  }
-
-  private minAmount(amountA: string, amountB: string): string {
-    return (BigInt(amountA) <= BigInt(amountB) ? BigInt(amountA) : BigInt(amountB)).toString();
   }
 }

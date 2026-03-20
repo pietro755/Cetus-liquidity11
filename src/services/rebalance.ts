@@ -550,7 +550,13 @@ export class RebalanceService {
         '',                   // no partner
       );
 
-      if (!result.isExceed && !result.isTimeout && result.splitPaths.length > 0) {
+      if (
+        result &&
+        Array.isArray(result.splitPaths) &&
+        !result.isExceed &&
+        !result.isTimeout &&
+        result.splitPaths.length > 0
+      ) {
         swapTx = await TransactionUtil.buildAggregatorSwapTransaction(
           sdk,
           result,
@@ -565,8 +571,9 @@ export class RebalanceService {
         });
       } else {
         logger.warn('Aggregator returned no usable route — falling back to direct pool swap', {
-          isExceed: result.isExceed,
-          isTimeout: result.isTimeout,
+          isExceed: result?.isExceed,
+          isTimeout: result?.isTimeout,
+          splitPaths: Array.isArray(result?.splitPaths) ? result.splitPaths.length : undefined,
         });
       }
     } catch (aggErr) {

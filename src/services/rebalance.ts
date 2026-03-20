@@ -183,16 +183,7 @@ export class RebalanceService {
         };
       }
 
-      // Use the exact env-configured token amounts — never derive from wallet balance.
-      logger.info('Using env-configured token amounts for initial position', {
-        tokenAAmount: this.config.tokenAAmount,
-        tokenBAmount: this.config.tokenBAmount,
-      });
-
-      const balances = {
-        amountA: this.config.tokenAAmount,
-        amountB: this.config.tokenBAmount,
-      };
+      const balances = await this.getWalletTokenAmountsForPosition(poolInfo, 'initial position');
 
       // Swap to correct token ratio if needed.
       const adjusted = await this.swapTokensIfNeeded(
@@ -296,17 +287,7 @@ export class RebalanceService {
       // Step 1: Remove liquidity from the out-of-range position.
       await this.removeLiquidity(position.positionId, storedLiquidity, poolInfo);
 
-      // Use the exact env-configured token amounts — never derive from wallet balance
-      // or position removal delta.
-      logger.info('Using env-configured token amounts for rebalanced position', {
-        tokenAAmount: this.config.tokenAAmount,
-        tokenBAmount: this.config.tokenBAmount,
-      });
-
-      const balances = {
-        amountA: this.config.tokenAAmount,
-        amountB: this.config.tokenBAmount,
-      };
+      const balances = await this.getWalletTokenAmountsForPosition(poolInfo, 'rebalanced position');
 
       // Step 3: Swap using Cetus aggregator if needed to reach the correct token ratio.
       const adjusted = await this.swapTokensIfNeeded(
@@ -701,12 +682,11 @@ export class RebalanceService {
   /**
    * Open a new position using an explicit two-step approach:
    *   1. openPositionTransactionPayload        → creates the position NFT
-   *   2. createAddLiquidityFixTokenPayload     → deposits only the tokens received
-   *                                              from the removed position
+   *   2. createAddLiquidityFixTokenPayload     → deposits the wallet-available
+   *                                              token amounts after any required swap
    *
-   * The token amounts (amountA / amountB) are the pre/post balance deltas computed
-   * in rebalancePosition — they represent exactly what was received when the old
-   * position was closed, never the full wallet balance.  The SDK derives the correct
+   * The token amounts (amountA / amountB) are the wallet-available amounts after
+   * applying the configured caps and any required swap. The SDK derives the correct
    * delta_liquidity from these amounts for the new tick range.
    */
   private async openNewPosition(
@@ -807,12 +787,9 @@ export class RebalanceService {
     await this.waitForPositionObject(suiClient, newPositionId);
 
     // -----------------------------------------------------------------------
-    // Step 2: Add liquidity using only the received token amounts.
-    //   amountA / amountB are the pre/post balance deltas from rebalancePosition
-    //   — they represent exactly what was received when the old position was
-    //   closed, not the full wallet balance.  createAddLiquidityFixTokenPayload
-    //   derives the correct delta_liquidity from these amounts for the new tick
-    //   range, so the bot never deposits more than it received from removal.
+    // Step 2: Add liquidity using the wallet-available token amounts after
+    // any required swap. createAddLiquidityFixTokenPayload derives the correct
+    // delta_liquidity from these amounts for the new tick range.
     // -----------------------------------------------------------------------
     const bigAmtA = BigInt(amountA || '0');
     const bigAmtB = BigInt(amountB || '0');
@@ -972,6 +949,34 @@ export class RebalanceService {
     throw new Error(`Position object ${positionId} not accessible after ${maxAttempts} attempts`);
   }
 
+  private async getWalletTokenAmountsForPosition(
+    poolInfo: PoolInfo,
+    positionContext: string,
+  ): Promise<{ amountA: string; amountB: string }> {
+    const [walletBalanceA, walletBalanceB] = await Promise.all([
+      this.sdkService.getBalance(poolInfo.coinTypeA),
+      this.sdkService.getBalance(poolInfo.coinTypeB),
+    ]);
+
+    const amountA = this.minAmount(walletBalanceA, this.config.tokenAAmount);
+    const amountB = this.minAmount(walletBalanceB, this.config.tokenBAmount);
+
+    logger.info(`Checked wallet balances for ${positionContext}`, {
+      walletBalanceA,
+      walletBalanceB,
+      configuredAmountA: this.config.tokenAAmount,
+      configuredAmountB: this.config.tokenBAmount,
+      usableAmountA: amountA,
+      usableAmountB: amountB,
+    });
+
+    if (BigInt(amountA) === 0n && BigInt(amountB) === 0n) {
+      throw new Error(`Insufficient wallet balances to open ${positionContext}`);
+    }
+
+    return { amountA, amountB };
+  }
+
   // ---------------------------------------------------------------------------
   // Private: retry helper
   // ---------------------------------------------------------------------------
@@ -1078,5 +1083,9 @@ export class RebalanceService {
   /** Normalise coin type for comparison (lowercased, leading zeros stripped). */
   private normalizeCoinType(ct: string): string {
     return ct.toLowerCase().replace(/^0x0+/, '0x');
+  }
+
+  private minAmount(amountA: string, amountB: string): string {
+    return (BigInt(amountA) <= BigInt(amountB) ? BigInt(amountA) : BigInt(amountB)).toString();
   }
 }

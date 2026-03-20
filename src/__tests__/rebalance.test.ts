@@ -7,6 +7,7 @@
 
 import { RebalanceService } from '../services/rebalance';
 import { PositionMonitorService } from '../services/monitor';
+import { TransactionUtil } from '@cetusprotocol/cetus-sui-clmm-sdk';
 
 // ---------------------------------------------------------------------------
 // Helpers to build minimal stubs
@@ -2229,6 +2230,129 @@ describe('wallet balance checks before opening a new position', () => {
     expect(result!.success).toBe(true);
     expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledTimes(1);
     expect(createSwapTransactionPayload).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the aggregator route when getBestRouter returns a V1-fallback result (isTimeout: true)', async () => {
+    // Regression test for: "No parameters available for service downgrade"
+    // When the aggregator API is unavailable the SDK falls back to RPC routing
+    // and marks the result with isTimeout: true.  The bot must use that result
+    // instead of falling through to the direct pool swap.
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const monitor = makeMonitor([], pool);
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      tokenAAmount: '1000000',
+      tokenBAmount: '1000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+    const createSwapTransactionPayload = jest.fn().mockReturnValue(mockTxStub);
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+
+    // V1-fallback result: isTimeout is true, but splitPaths is non-empty and
+    // isExceed is false — the bot should accept and use this result.
+    const v1FallbackResult = {
+      isExceed: false,
+      isTimeout: true,
+      inputAmount: 800000,
+      outputAmount: 750000,
+      fromCoin: '0xcoinA',
+      toCoin: '0xcoinB',
+      byAmountIn: true,
+      splitPaths: [{ percent: 100, inputAmount: 800000, outputAmount: 750000, pathIndex: 0,
+        basePaths: [] /* intentionally empty — only the path count matters for this test */ }],
+    };
+
+    const mockSdk = {
+      RouterV2: {
+        getBestRouter: jest.fn().mockResolvedValue({ result: v1FallbackResult, version: 'v1' }),
+      },
+      Swap: {
+        createSwapTransactionPayload,
+      },
+      Position: {
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    let getBalanceCallCount = 0;
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xswap',
+          balanceChanges: [],
+        })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 2) {
+          return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '800000' : '0' });
+        }
+        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '400000' : '350000' });
+      }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? '800000' : '0')),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    // Spy on TransactionUtil.buildAggregatorSwapTransaction so we can verify
+    // it is called (aggregator path) rather than the direct pool swap path.
+    const buildAggSpy = jest
+      .spyOn(TransactionUtil, 'buildAggregatorSwapTransaction')
+      .mockResolvedValue(mockTxStub as any);
+
+    try {
+      const svc = new RebalanceService(sdkService, monitor, config);
+      const result = await svc.checkAndRebalance('0xpool');
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(true);
+      expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledTimes(1);
+      // Aggregator path must be used — direct pool swap must NOT be called.
+      expect(createSwapTransactionPayload).not.toHaveBeenCalled();
+      expect(buildAggSpy).toHaveBeenCalledTimes(1);
+      // swapWithMultiPoolParams must be passed so the SDK can fall back to RPC
+      // routing without throwing "No parameters available for service downgrade".
+      expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledWith(
+        expect.any(String),   // fromCoin
+        expect.any(String),   // toCoin
+        expect.any(Number),   // amount
+        true,                 // byAmountIn
+        0,                    // priceSplitPoint
+        '',                   // partner
+        '',                   // _senderAddress (deprecated)
+        expect.objectContaining({
+          poolAddresses: ['0xpool'],
+          byAmountIn: true,
+          coinTypeA: '0xcoinA',
+          coinTypeB: '0xcoinB',
+        }),
+      );
+    } finally {
+      buildAggSpy.mockRestore();
+    }
   });
 
   it('fails gracefully when neither required token is available in the wallet', async () => {

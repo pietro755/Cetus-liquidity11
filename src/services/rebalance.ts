@@ -4,7 +4,7 @@ import { BotConfig } from '../config';
 import { logger } from '../utils/logger';
 import BN from 'bn.js';
 import { TransactionUtil, TickMath } from '@cetusprotocol/cetus-sui-clmm-sdk';
-import type { AddLiquidityFixTokenParams, CoinAsset, SwapParams } from '@cetusprotocol/cetus-sui-clmm-sdk';
+import type { AddLiquidityFixTokenParams, CoinAsset, PreSwapWithMultiPoolParams, SwapParams } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import type { BalanceChange } from '@mysten/sui/client';
 
 export interface RebalanceResult {
@@ -540,6 +540,19 @@ export class RebalanceService {
     // Try the Cetus aggregator first for optimal routing.
     let swapTx;
 
+    // Provide the known pool as a fallback for the SDK's internal RPC downgrade.
+    // Without this, getBestRouter throws "No parameters available for service
+    // downgrade" when the aggregator API is unavailable and the SDK's graph has
+    // no registered route for the pair.
+    const swapWithMultiPoolParams: PreSwapWithMultiPoolParams = {
+      poolAddresses: [poolInfo.poolAddress],
+      a2b,
+      byAmountIn: true,
+      amount: swapAmount.toString(),
+      coinTypeA: poolInfo.coinTypeA,
+      coinTypeB: poolInfo.coinTypeB,
+    };
+
     try {
       const { result } = await sdk.RouterV2.getBestRouter(
         fromCoin,
@@ -548,13 +561,19 @@ export class RebalanceService {
         true,                 // byAmountIn
         0,                    // no split
         '',                   // no partner
+        '',                   // _senderAddress — deprecated in SDK; must be
+                              // supplied to correctly position swapWithMultiPoolParams
+        swapWithMultiPoolParams,
       );
 
+      // Accept the result whether it came from the aggregator API (isTimeout:
+      // false) or the SDK's V1/RPC fallback (isTimeout: true).  The SDK sets
+      // isTimeout: true for the V1 fallback result; it does not mean a real
+      // timeout and the splitPaths it carries are still valid and executable.
       if (
         result &&
         Array.isArray(result.splitPaths) &&
         !result.isExceed &&
-        !result.isTimeout &&
         result.splitPaths.length > 0
       ) {
         swapTx = await TransactionUtil.buildAggregatorSwapTransaction(

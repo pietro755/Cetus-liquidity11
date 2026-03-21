@@ -297,7 +297,7 @@ export class RebalanceService {
       await this.removeLiquidity(position.positionId, storedLiquidity, poolInfo);
 
       const balances = await this.readWalletTokenBalances(poolInfo);
-      const required = this.computeInitialPositionTokenAmounts(poolInfo);
+      const required = this.computeRebalancedPositionTokenAmounts(poolInfo, lower, upper);
       const adjusted = await this.ensureBalances(
         poolInfo,
         lower,
@@ -1366,6 +1366,67 @@ export class RebalanceService {
     });
 
     return { requiredAmountA, requiredAmountB, amountA, amountB };
+  }
+
+  private computeRebalancedPositionTokenAmounts(
+    poolInfo: PoolInfo,
+    tickLower: number,
+    tickUpper: number,
+  ): {
+    requiredAmountA: string;
+    requiredAmountB: string;
+    amountA: string;
+    amountB: string;
+  } {
+    const totalUsd = BigInt(this.config.totalUsd);
+    const sqrtP = BigInt(poolInfo.currentSqrtPrice);
+    const two128 = 2n ** 128n;
+    const priceANumerator = sqrtP * sqrtP;
+
+    if (priceANumerator === 0n) {
+      throw new Error('Cannot compute token amounts for rebalanced position: pool price is zero');
+    }
+
+    if (poolInfo.currentTickIndex < tickLower) {
+      const requiredAmountABigInt = totalUsd * two128 / priceANumerator;
+      const amountABigInt =
+        requiredAmountABigInt * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
+        INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR;
+
+      if (requiredAmountABigInt === 0n || amountABigInt === 0n) {
+        throw new Error(
+          `TOTAL_USD (${this.config.totalUsd}) is too small to create a rebalanced position below range at the current pool price.`,
+        );
+      }
+
+      return {
+        requiredAmountA: requiredAmountABigInt.toString(),
+        requiredAmountB: '0',
+        amountA: amountABigInt.toString(),
+        amountB: '0',
+      };
+    }
+
+    if (poolInfo.currentTickIndex >= tickUpper) {
+      const amountBBigInt =
+        totalUsd * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
+        INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR;
+
+      if (totalUsd === 0n || amountBBigInt === 0n) {
+        throw new Error(
+          `TOTAL_USD (${this.config.totalUsd}) is too small to create a rebalanced position above range at the current pool price.`,
+        );
+      }
+
+      return {
+        requiredAmountA: '0',
+        requiredAmountB: totalUsd.toString(),
+        amountA: '0',
+        amountB: amountBBigInt.toString(),
+      };
+    }
+
+    return this.computeInitialPositionTokenAmounts(poolInfo);
   }
 
   // ---------------------------------------------------------------------------

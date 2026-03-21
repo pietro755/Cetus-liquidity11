@@ -1926,9 +1926,10 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     expect(callArgs.amount_b).toBe('100000');
   });
 
-  it('fails with a clear error when TOTAL_USD is too small for integer arithmetic (halfUsd=0)', async () => {
+  it('falls back to full wallet balance when TOTAL_USD is too small for integer arithmetic (halfUsd=0)', async () => {
     // TOTAL_USD=1 → halfUsd = 1n/2n = 0n → both required amounts are 0 →
-    // computeInitialPositionTokenAmounts throws "Invalid required amounts".
+    // computeInitialPositionTokenAmounts logs a warning and returns zeros →
+    // caller treats zeros as uncapped (undefined) → full wallet balance is used.
     process.env.DRY_RUN = 'false';
 
     const pool = makePoolInfo({
@@ -1943,7 +1944,7 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      totalUsd: '1',  // halfUsd = 0n — triggers the truncation bug
+      totalUsd: '1',  // halfUsd = 0n — both required amounts truncate to 0
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -1984,10 +1985,15 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
 
-    // TOTAL_USD=1 → both required amounts are 0 → error thrown, position not created.
+    // TOTAL_USD=1 → both required amounts are 0 → falls back to full wallet balance →
+    // position is created successfully.
     expect(result).not.toBeNull();
-    expect(result!.success).toBe(false);
-    expect(result!.error).toMatch(/Invalid required amounts/);
+    expect(result!.success).toBe(true);
+    expect(result!.newPosition).toEqual({ tickLower: 400, tickUpper: 600 });
+    // Full wallet balances are used for deposit (no TOTAL_USD cap applied)
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    expect(callArgs.amount_a).toBe('972427');
+    expect(callArgs.amount_b).toBe('2818067929');
   });
 
   it('uses post-step-1 wallet balance for step 2 when token A is depleted by gas', async () => {

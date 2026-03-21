@@ -514,7 +514,7 @@ export class RebalanceService {
         return { amountA, amountB, didSwap: false };
       }
       if (bigA > 0n && bigB > 0n) {
-        logger.warn('[WARN] Insufficient balance, attempting swap', {
+        logger.warn('Insufficient balance, attempting swap', {
           currentAmountA: amountA,
           currentAmountB: amountB,
           requiredAmountA: requiredAmountA.toString(),
@@ -778,8 +778,8 @@ export class RebalanceService {
     const walletAmountA = BigInt(walletBalances.amountA);
     const walletAmountB = BigInt(walletBalances.amountB);
 
-    logger.info(`[INFO] Required: A=${requiredAmountA.toString()} B=${requiredAmountB.toString()}`);
-    logger.info(`[INFO] Wallet: A=${walletAmountA.toString()} B=${walletAmountB.toString()}`);
+    logger.info(`Required: A=${requiredAmountA.toString()} B=${requiredAmountB.toString()}`);
+    logger.info(`Wallet: A=${walletAmountA.toString()} B=${walletAmountB.toString()}`);
 
     const hasInsufficientBalance = !this.hasSufficientBalance(
       walletAmountA,
@@ -789,7 +789,7 @@ export class RebalanceService {
     );
 
     if (hasInsufficientBalance) {
-      logger.warn('[WARN] Insufficient balance, attempting swap', { positionContext });
+      logger.warn('Insufficient balance, attempting swap', { positionContext });
     }
 
     const swapResult = await this.swapTokensIfNeeded(
@@ -820,7 +820,7 @@ export class RebalanceService {
         refreshedAmountA: postSwapBalances.amountA,
         refreshedAmountB: postSwapBalances.amountB,
       });
-      logger.info(`[INFO] Wallet: A=${postSwapBalances.amountA} B=${postSwapBalances.amountB}`);
+      logger.info(`Wallet: A=${postSwapBalances.amountA} B=${postSwapBalances.amountB}`);
     }
 
     const finalWalletAmountA = BigInt(postSwapBalances.amountA);
@@ -840,14 +840,12 @@ export class RebalanceService {
       const scaledAmountA = (requiredAmountA * scale) / precision;
       const scaledAmountB = (requiredAmountB * scale) / precision;
 
-      logger.warn('[WARN] Scaling down position size to fit wallet balance', {
+      logger.warn('Scaling down position size to fit wallet balance', {
         positionContext,
         scale: scale.toString(),
       });
-      logger.warn('[WARN] Scaling down position due to insufficient balance');
-
-      const finalAmountA = this.getMinimumOfTwoAmounts(finalWalletAmountA.toString(), scaledAmountA.toString());
-      const finalAmountB = this.getMinimumOfTwoAmounts(finalWalletAmountB.toString(), scaledAmountB.toString());
+      const finalAmountA = scaledAmountA.toString();
+      const finalAmountB = scaledAmountB.toString();
 
       if (BigInt(finalAmountA) === 0n && BigInt(finalAmountB) === 0n) {
         throw new Error(`Insufficient wallet balances to open ${positionContext}`);

@@ -2514,6 +2514,6 @@ describe('wallet balance checks before opening a new position', () => {
 
     expect(result).not.toBeNull();
     expect(result!.success).toBe(false);
-    expect(result!.error).toMatch(/Insufficient wallet balances to open initial position|Insufficient wallet balances to open new position/);
+    expect(result!.error).toMatch(/Insufficient wallet balances to open initial position/);
   });
 });

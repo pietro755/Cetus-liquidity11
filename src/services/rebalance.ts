@@ -296,14 +296,17 @@ export class RebalanceService {
       // Step 1: Remove liquidity from the out-of-range position.
       await this.removeLiquidity(position.positionId, storedLiquidity, poolInfo);
 
-      const balances = await this.getWalletTokenAmountsForPosition(poolInfo, 'rebalanced position');
+      const balances = await this.readWalletTokenBalances(poolInfo);
+      const required = this.computeInitialPositionTokenAmounts(poolInfo);
       const adjusted = await this.ensureBalances(
         poolInfo,
         lower,
         upper,
         {
-          requiredAmountA: balances.amountA,
-          requiredAmountB: balances.amountB,
+          requiredAmountA: required.requiredAmountA,
+          requiredAmountB: required.requiredAmountB,
+          usableAmountA: required.amountA !== '0' ? required.amountA : undefined,
+          usableAmountB: required.amountB !== '0' ? required.amountB : undefined,
         },
         'rebalanced position',
         balances,

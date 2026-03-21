@@ -2724,6 +2724,8 @@ describe('wallet balance checks before opening a new position', () => {
     const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
 
     const aggregatorResult = {
+      // Match the SDK's V1/RPC fallback shape: the route is still usable, but
+      // router token metadata must be present for the aggregator transaction builder.
       isExceed: false,
       isTimeout: true,
       inputAmount: 800000,
@@ -2736,6 +2738,9 @@ describe('wallet balance checks before opening a new position', () => {
 
     const routerCoinMap = new Map<string, any>();
     const tokenInfo = jest.fn((coinType: string) => routerCoinMap.get(coinType));
+    const loadGraph = jest.fn(({ coins }: { coins: Array<{ address: string; decimals: number }> }) => {
+      coins.forEach((coin) => routerCoinMap.set(coin.address, coin));
+    });
 
     const mockSdk = {
       RouterV2: {
@@ -2743,7 +2748,7 @@ describe('wallet balance checks before opening a new position', () => {
       },
       Router: {
         tokenInfo,
-        _coinAddressMap: routerCoinMap,
+        loadGraph,
       },
       Token: {
         getTokenListByCoinTypes: jest.fn().mockResolvedValue({
@@ -2816,6 +2821,7 @@ describe('wallet balance checks before opening a new position', () => {
       expect(result).not.toBeNull();
       expect(result!.success).toBe(true);
       expect(mockSdk.Token.getTokenListByCoinTypes).toHaveBeenCalledWith(['0xcoinA', '0xcoinB']);
+      expect(loadGraph).toHaveBeenCalledTimes(1);
       expect(createSwapTransactionPayload).not.toHaveBeenCalled();
       expect(buildAggSpy).toHaveBeenCalledTimes(1);
     } finally {

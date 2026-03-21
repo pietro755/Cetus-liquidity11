@@ -1474,26 +1474,36 @@ export class RebalanceService {
   }
 
   private async ensureRouterTokenMetadata(
-    sdk: any,
+    sdk: {
+      Router?: {
+        tokenInfo?: (coinType: string) => { address: string; decimals: number } | undefined;
+        loadGraph?: (
+          coins: { coins: Array<{ address: string; decimals: number }> },
+          paths: { paths: Array<{ base: string; quote: string; addressMap: Map<number, string> }> },
+        ) => void;
+      };
+      Token?: {
+        getTokenListByCoinTypes?: (coinTypes: string[]) => Promise<Record<string, { address: string; decimals: number }>>;
+      };
+    },
     coinTypes: string[],
   ): Promise<void> {
-    const router = sdk?.Router;
-    const tokenModule = sdk?.Token;
-    const coinAddressMap: Map<string, any> | undefined = router?._coinAddressMap;
+    const router = sdk.Router;
+    const tokenModule = sdk.Token;
 
     if (
       !router ||
       typeof router.tokenInfo !== 'function' ||
+      typeof router.loadGraph !== 'function' ||
       !tokenModule ||
-      typeof tokenModule.getTokenListByCoinTypes !== 'function' ||
-      !coinAddressMap
+      typeof tokenModule.getTokenListByCoinTypes !== 'function'
     ) {
       return;
     }
 
     const missingCoinTypes = [...new Set(coinTypes)]
       .filter(Boolean)
-      .filter((coinType: string) => !router.tokenInfo(coinType));
+      .filter((coinType: string) => !router.tokenInfo?.(coinType));
 
     if (missingCoinTypes.length === 0) {
       return;
@@ -1501,6 +1511,7 @@ export class RebalanceService {
 
     try {
       const tokenMap = await tokenModule.getTokenListByCoinTypes(missingCoinTypes);
+      const coins = new Map<string, { address: string; decimals: number }>();
 
       for (const coinType of missingCoinTypes) {
         const tokenInfo = tokenMap?.[coinType];
@@ -1509,13 +1520,27 @@ export class RebalanceService {
           continue;
         }
 
-        coinAddressMap.set(tokenInfo.address, tokenInfo);
-        coinAddressMap.set(this.normalizeCoinType(tokenInfo.address), tokenInfo);
-        coinAddressMap.set(coinType, tokenInfo);
-        coinAddressMap.set(this.normalizeCoinType(coinType), tokenInfo);
+        coins.set(tokenInfo.address, tokenInfo);
+        coins.set(this.normalizeCoinType(tokenInfo.address), {
+          address: this.normalizeCoinType(tokenInfo.address),
+          decimals: tokenInfo.decimals,
+        });
+        coins.set(coinType, {
+          address: coinType,
+          decimals: tokenInfo.decimals,
+        });
+        coins.set(this.normalizeCoinType(coinType), {
+          address: this.normalizeCoinType(coinType),
+          decimals: tokenInfo.decimals,
+        });
+      }
+
+      if (coins.size > 0) {
+        router.loadGraph({ coins: [...coins.values()] }, { paths: [] });
       }
     } catch (error) {
       logger.warn('Failed to preload router token metadata for aggregator swap', error);
     }
   }
+
 }

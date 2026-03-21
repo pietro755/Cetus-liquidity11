@@ -1926,10 +1926,9 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     expect(callArgs.amount_b).toBe('100000');
   });
 
-  it('falls back to full wallet balance when TOTAL_USD is too small for integer arithmetic (halfUsd=0)', async () => {
-    // TOTAL_USD=1 → halfUsd = 1n/2n = 0n → both required amounts are 0 →
-    // computeInitialPositionTokenAmounts logs a warning and returns 0 values;
-    // createInitialPosition treats them as uncapped and uses the full wallet balance.
+  it('returns a clear failure when TOTAL_USD is too small for initial-position integer arithmetic', async () => {
+    // TOTAL_USD=1 → halfUsd = 0n → both required and buffered amounts are 0.
+    // The bot should fail fast instead of silently opening with the full wallet.
     process.env.DRY_RUN = 'false';
 
     const pool = makePoolInfo({
@@ -1985,18 +1984,13 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
 
-    // TOTAL_USD=1 → both required amounts are 0 → falls back to full wallet balance
-    // → position is successfully created using the available wallet tokens.
     expect(result).not.toBeNull();
-    expect(result!.success).toBe(true);
-    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // Expected amounts are the full wallet balances from the sdkService mock above:
-    // getBalance returns '972427' for coinA and '2818067929' for coinB.
-    expect(callArgs.amount_a).toBe('972427');
-    expect(callArgs.amount_b).toBe('2818067929');
+    expect(result!.success).toBe(false);
+    expect(result!.error).toMatch(/TOTAL_USD \(1\) is too small to create an initial position/i);
+    expect(createAddLiquidityFixTokenPayload).not.toHaveBeenCalled();
   });
 
-  it('re-reads wallet balances if the fallback path still resolves to zero amounts', async () => {
+  it('returns a clear failure when the safety buffer would round initial amounts down to zero', async () => {
     process.env.DRY_RUN = 'false';
 
     const pool = makePoolInfo({
@@ -2011,7 +2005,7 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      totalUsd: '1',
+      totalUsd: '2',
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -2049,19 +2043,12 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     } as any;
 
     const svc = new RebalanceService(sdkService, monitor, config);
-    jest.spyOn(svc as any, 'ensureBalances').mockResolvedValue({ amountA: '0', amountB: '0' });
-    jest.spyOn(svc as any, 'readWalletTokenBalances').mockResolvedValue({
-      amountA: '972427',
-      amountB: '2818067929',
-    });
-
     const result = await svc.checkAndRebalance('0xpool');
 
     expect(result).not.toBeNull();
-    expect(result!.success).toBe(true);
-    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    expect(callArgs.amount_a).toBe('972427');
-    expect(callArgs.amount_b).toBe('2818067929');
+    expect(result!.success).toBe(false);
+    expect(result!.error).toMatch(/TOTAL_USD \(2\) is too small to create an initial position/i);
+    expect(createAddLiquidityFixTokenPayload).not.toHaveBeenCalled();
   });
 
   it('uses post-step-1 wallet balance for step 2 when token A is depleted by gas', async () => {

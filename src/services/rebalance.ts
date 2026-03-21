@@ -190,12 +190,6 @@ export class RebalanceService {
       // converted using the freshest available price.
       const currentPoolInfo = await this.monitorService.getPoolInfo(poolInfo.poolAddress);
       const required = this.computeInitialPositionTokenAmounts(currentPoolInfo);
-      const shouldFallbackToWalletBalance =
-        BigInt(required.requiredAmountA) === 0n && BigInt(required.requiredAmountB) === 0n;
-      // When the TOTAL_USD budget is so small that integer arithmetic truncates
-      // the computed amounts to zero, treat them as uncapped (undefined) so
-      // capAmount falls back to the full wallet balance.  A zero cap would
-      // otherwise prevent any tokens from being deposited.
       let balancesAfterEnsure = await this.ensureBalances(
         currentPoolInfo,
         lower,
@@ -208,24 +202,6 @@ export class RebalanceService {
         },
         'initial position',
       );
-
-      if (
-        shouldFallbackToWalletBalance &&
-        BigInt(balancesAfterEnsure.amountA) === 0n &&
-        BigInt(balancesAfterEnsure.amountB) === 0n
-      ) {
-        const walletBalances = await this.readWalletTokenBalances(currentPoolInfo);
-        if (BigInt(walletBalances.amountA) > 0n || BigInt(walletBalances.amountB) > 0n) {
-          logger.warn(
-            'Initial position fallback resolved to zero deposit amounts — using fresh wallet balances instead',
-            {
-              walletAmountA: walletBalances.amountA,
-              walletAmountB: walletBalances.amountB,
-            },
-          );
-          balancesAfterEnsure = walletBalances;
-        }
-      }
 
       // Open the new position.
       const result = await this.openNewPosition(
@@ -1346,24 +1322,32 @@ export class RebalanceService {
 
     // priceA = amount of tokenB per 1 tokenA = sqrtPrice^2 / 2^128
     // amountA = halfUsd / priceA = halfUsd * 2^128 / sqrtPrice^2
-    const requiredAmountA = (halfUsd * priceADenominator / priceANumerator).toString();
-    const requiredAmountB = halfUsd.toString();
+    const requiredAmountABigInt = halfUsd * priceADenominator / priceANumerator;
+    const requiredAmountBBigInt = halfUsd;
+    const amountABigInt =
+      requiredAmountABigInt * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
+      INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR;
+    const amountBBigInt =
+      requiredAmountBBigInt * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
+      INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR;
+    const requiredAmountA = requiredAmountABigInt.toString();
+    const requiredAmountB = requiredAmountBBigInt.toString();
+    const amountA = amountABigInt.toString();
+    const amountB = amountBBigInt.toString();
+    const priceAScaled = (priceANumerator * 1_000_000n) / priceADenominator;
 
-    if (BigInt(requiredAmountA) === 0n && BigInt(requiredAmountB) === 0n) {
-      logger.warn(
-        'TOTAL_USD too small for integer arithmetic — computed amounts are 0; falling back to full wallet balance',
-        { totalUsd: this.config.totalUsd },
+    if (
+      requiredAmountABigInt === 0n ||
+      requiredAmountBBigInt === 0n ||
+      amountABigInt === 0n ||
+      amountBBigInt === 0n
+    ) {
+      throw new Error(
+        `TOTAL_USD (${this.config.totalUsd}) is too small to create an initial position at the current pool price. ` +
+        `Computed amounts: required A=${requiredAmountA} B=${requiredAmountB}, buffered A=${amountA} B=${amountB}. ` +
+        'Increase TOTAL_USD in tokenB base units (for example, 1000000 = 1.0 tokenB).',
       );
     }
-    const amountA = (
-      BigInt(requiredAmountA) * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
-      INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR
-    ).toString();
-    const amountB = (
-      BigInt(requiredAmountB) * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
-      INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR
-    ).toString();
-    const priceAScaled = (priceANumerator * 1_000_000n) / priceADenominator;
 
     logger.info('Initial position TOTAL_USD conversion', {
       totalUsd: this.config.totalUsd,

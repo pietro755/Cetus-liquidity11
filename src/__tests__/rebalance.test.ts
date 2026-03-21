@@ -1926,10 +1926,9 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     expect(callArgs.amount_b).toBe('100000');
   });
 
-  it('falls back to wallet balances when TOTAL_USD is too small for integer arithmetic (halfUsd=0)', async () => {
-    // TOTAL_USD=1 → halfUsd = 1n/2n = 0n → computeInitialPositionTokenAmounts
-    // returns amountA="0", amountB="0".  Without the fix, capAmount("wallet","0")="0"
-    // causes openNewPosition to throw "Insufficient wallet balances to open new position".
+  it('fails with a clear error when TOTAL_USD is too small for integer arithmetic (halfUsd=0)', async () => {
+    // TOTAL_USD=1 → halfUsd = 1n/2n = 0n → both required amounts are 0 →
+    // computeInitialPositionTokenAmounts throws "Invalid required amounts".
     process.env.DRY_RUN = 'false';
 
     const pool = makePoolInfo({
@@ -1985,15 +1984,10 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
 
-    // Position must be created successfully, not fail with "Insufficient wallet balances".
+    // TOTAL_USD=1 → both required amounts are 0 → error thrown, position not created.
     expect(result).not.toBeNull();
-    expect(result!.success).toBe(true);
-
-    // Both wallet amounts should pass through to createAddLiquidityFixTokenPayload
-    // since no meaningful TOTAL_USD cap could be computed.
-    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    expect(BigInt(callArgs.amount_a)).toBeGreaterThan(0n);
-    expect(BigInt(callArgs.amount_b)).toBeGreaterThan(0n);
+    expect(result!.success).toBe(false);
+    expect(result!.error).toMatch(/Invalid required amounts/);
   });
 
   it('uses post-step-1 wallet balance for step 2 when token A is depleted by gas', async () => {
@@ -2003,6 +1997,9 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     // SUI, its on-chain balance after step 1 is lower than what was read before
     // step 1.  Step 2 (createAddLiquidityFixTokenPayload) must use the fresh
     // post-step-1 balance, not the stale pre-step-1 balance.
+    //
+    // TOTAL_USD is set so that usableAmountA > POST_STEP1_A, which ensures the
+    // post-step-1 read (not the stale pre-step-1 cap) determines step 2 amountA.
     process.env.DRY_RUN = 'false';
 
     const pool = makePoolInfo({
@@ -2017,7 +2014,9 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      totalUsd: '1',  // halfUsd = 0n — triggers full-wallet-balance fallback
+      // TOTAL_USD=1940000 → halfUsd=970000; priceA=1 → requiredAmountA=970000 ≤ walletA=972427
+      // usableAmountA = 970000*98/100 = 950600 > POST_STEP1_A=922427 → step2 uses gas-depleted A
+      totalUsd: '1940000',
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -2071,7 +2070,8 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     // Step 2 must use the post-step-1 (gas-depleted) balance, not the stale value.
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
     expect(callArgs.amount_a).toBe(POST_STEP1_A);  // 922427, not 972427
-    expect(callArgs.amount_b).toBe('2818067929');
+    // usableAmountB = 970000*98/100 = 950600 (capped by TOTAL_USD); walletB=2818067929 > cap
+    expect(callArgs.amount_b).toBe('950600');
   });
 });
 
@@ -2624,13 +2624,13 @@ describe('wallet balance checks before opening a new position', () => {
         expect.any(String),   // fromCoin
         expect.any(String),   // toCoin
         expect.any(Number),   // amount
-        true,                 // byAmountIn
+        false,                // byAmountIn (exactOut for deficit swap)
         0,                    // priceSplitPoint
         '',                   // partner
         '',                   // _senderAddress (deprecated)
         expect.objectContaining({
           poolAddresses: ['0xpool'],
-          byAmountIn: true,
+          byAmountIn: false,
           coinTypeA: '0xcoinA',
           coinTypeB: '0xcoinB',
         }),
@@ -2666,6 +2666,6 @@ describe('wallet balance checks before opening a new position', () => {
 
     expect(result).not.toBeNull();
     expect(result!.success).toBe(false);
-    expect(result!.error).toMatch(/Insufficient wallet balances to open initial position/);
+    expect(result!.error).toMatch(/No usable balance to open initial position/);
   });
 });

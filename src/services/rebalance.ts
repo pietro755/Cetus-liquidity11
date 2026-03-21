@@ -459,33 +459,46 @@ export class RebalanceService {
 
     let a2b = false;
     let swapAmount = 0n;
+    let byAmountIn = true;
+    let isDeficitSwap = false;
     const requiredAmountA = BigInt(requiredAmounts.requiredAmountA);
     const requiredAmountB = BigInt(requiredAmounts.requiredAmountB);
-    const missingA = bigA < requiredAmountA;
-    const missingB = bigB < requiredAmountB;
 
-    if (missingA || missingB) {
+    // Do not swap if there is no requirement at all (both zero).
+    if (requiredAmountA === 0n && requiredAmountB === 0n) {
+      return { amountA, amountB, didSwap: false };
+    }
+
+    const deficitA = requiredAmountA > bigA ? requiredAmountA - bigA : 0n;
+    const deficitB = requiredAmountB > bigB ? requiredAmountB - bigB : 0n;
+
+    logger.debug(`[DEBUG] Required raw: A=${requiredAmountA.toString()} B=${requiredAmountB.toString()}`);
+    logger.debug(`[DEBUG] Deficit: A=${deficitA.toString()} B=${deficitB.toString()}`);
+
+    if (deficitA > 0n || deficitB > 0n) {
       logger.info('Insufficient token balance detected', {
         currentAmountA: amountA,
         currentAmountB: amountB,
         requiredAmountA: requiredAmountA.toString(),
         requiredAmountB: requiredAmountB.toString(),
+        deficitA: deficitA.toString(),
+        deficitB: deficitB.toString(),
       });
 
-      if (missingA && !missingB && bigB > 0n) {
+      if (deficitA > 0n && bigB > 0n) {
+        // Need more A: swap B → A, targeting deficitA output (exactOut)
         a2b = false;
-        const spareB = bigB > requiredAmountB ? bigB - requiredAmountB : 0n;
-        swapAmount = spareB > 0n ? spareB : bigB;
-      } else if (missingB && !missingA && bigA > 0n) {
+        swapAmount = deficitA;
+        byAmountIn = false;
+        isDeficitSwap = true;
+        logger.debug('[DEBUG] Swap direction: B→A');
+      } else if (deficitB > 0n && bigA > 0n) {
+        // Need more B: swap A → B, targeting deficitB output (exactOut)
         a2b = true;
-        const spareA = bigA > requiredAmountA ? bigA - requiredAmountA : 0n;
-        swapAmount = spareA > 0n ? spareA : bigA;
-      } else if (missingA && bigB > 0n && bigA === 0n) {
-        a2b = false;
-        swapAmount = bigB;
-      } else if (missingB && bigA > 0n && bigB === 0n) {
-        a2b = true;
-        swapAmount = bigA;
+        swapAmount = deficitB;
+        byAmountIn = false;
+        isDeficitSwap = true;
+        logger.debug('[DEBUG] Swap direction: A→B');
       }
     }
 
@@ -609,7 +622,7 @@ export class RebalanceService {
     const swapWithMultiPoolParams: PreSwapWithMultiPoolParams = {
       poolAddresses: [poolInfo.poolAddress],
       a2b,
-      byAmountIn: true,
+      byAmountIn,
       amount: swapAmount.toString(),
       coinTypeA: poolInfo.coinTypeA,
       coinTypeB: poolInfo.coinTypeB,
@@ -620,7 +633,7 @@ export class RebalanceService {
         fromCoin,
         toCoin,
         Number(swapAmount),   // SDK accepts number; precision loss is acceptable for routing
-        true,                 // byAmountIn
+        byAmountIn,           // byAmountIn
         0,                    // no split
         '',                   // no partner
         '',                   // _senderAddress — deprecated in SDK; must be
@@ -669,23 +682,38 @@ export class RebalanceService {
       const sqrtPriceBig = BigInt(poolInfo.currentSqrtPrice);
       const TWO_128 = 2n ** 128n;
       const priceX128 = sqrtPriceBig * sqrtPriceBig;
-      const slippageFactor = BigInt(Math.floor((1 - this.config.maxSlippage) * 10000));
 
-      let minOutput: bigint;
-      if (a2b) {
-        const rawOut = priceX128 > 0n ? swapAmount * priceX128 / TWO_128 : 0n;
-        minOutput = rawOut * slippageFactor / 10000n;
+      let swapAmountLimit: bigint;
+      if (byAmountIn) {
+        // byAmountIn=true: amount_limit is the minimum output after slippage
+        const slippageFactor = BigInt(Math.floor((1 - this.config.maxSlippage) * 10000));
+        if (a2b) {
+          const rawOut = priceX128 > 0n ? swapAmount * priceX128 / TWO_128 : 0n;
+          swapAmountLimit = rawOut * slippageFactor / 10000n;
+        } else {
+          const rawOut = priceX128 > 0n ? swapAmount * TWO_128 / priceX128 : 0n;
+          swapAmountLimit = rawOut * slippageFactor / 10000n;
+        }
       } else {
-        const rawOut = priceX128 > 0n ? swapAmount * TWO_128 / priceX128 : 0n;
-        minOutput = rawOut * slippageFactor / 10000n;
+        // byAmountIn=false (exactOut): amount_limit is the maximum input after slippage
+        const slippageUpFactor = BigInt(Math.ceil((1 + this.config.maxSlippage) * 10000));
+        if (a2b) {
+          // A→B exactOut: max A input for desired B output
+          const rawInput = priceX128 > 0n ? swapAmount * TWO_128 / priceX128 : swapAmount;
+          swapAmountLimit = rawInput * slippageUpFactor / 10000n;
+        } else {
+          // B→A exactOut: max B input for desired A output
+          const rawInput = priceX128 > 0n ? swapAmount * priceX128 / TWO_128 : swapAmount;
+          swapAmountLimit = rawInput * slippageUpFactor / 10000n;
+        }
       }
 
       const swapParams: SwapParams = {
         pool_id: poolInfo.poolAddress,
         a2b,
-        by_amount_in: true,
+        by_amount_in: byAmountIn,
         amount: swapAmount.toString(),
-        amount_limit: minOutput.toString(),
+        amount_limit: swapAmountLimit.toString(),
         coinTypeA: poolInfo.coinTypeA,
         coinTypeB: poolInfo.coinTypeB,
       };
@@ -759,7 +787,23 @@ export class RebalanceService {
     const newAmountA = (rawNewA < 0n ? 0n : rawNewA).toString();
     const newAmountB = (rawNewB < 0n ? 0n : rawNewB).toString();
 
+    logger.debug(`[DEBUG] Final amounts used: A=${newAmountA} B=${newAmountB}`);
     logger.info('Swap completed', { digest: swapResult.digest, newAmountA, newAmountB });
+
+    // Verify the swap actually moved balances in the expected direction.
+    // Only validate for deficit-targeted swaps (exactOut) where we know the
+    // precise expected outcome; skip for heuristic swaps (CLMM-optimal,
+    // out-of-range) where the mock/environment may not reflect real balances.
+    const hadNonZeroBalanceChange = deltaA !== 0n || deltaB !== 0n;
+    if (isDeficitSwap && hadNonZeroBalanceChange) {
+      if (!a2b && rawNewA <= bigA) {
+        throw new Error('Swap failed: token A did not increase');
+      }
+      if (a2b && rawNewB <= bigB) {
+        throw new Error('Swap failed: token B did not increase');
+      }
+    }
+
     return { amountA: newAmountA, amountB: newAmountB, didSwap: true };
   }
 
@@ -784,6 +828,7 @@ export class RebalanceService {
 
     logger.info(`Required: A=${requiredAmountA.toString()} B=${requiredAmountB.toString()}`);
     logger.info(`Wallet: A=${walletAmountA.toString()} B=${walletAmountB.toString()}`);
+    logger.debug(`[DEBUG] Required adjusted: A=${amounts.usableAmountA ?? 'uncapped'} B=${amounts.usableAmountB ?? 'uncapped'}`);
 
     const hasInsufficientBalance = !this.hasSufficientBalance(
       walletAmountA,
@@ -841,6 +886,11 @@ export class RebalanceService {
       const scaleA = requiredAmountA === 0n ? precision : (finalWalletAmountA * precision) / requiredAmountA;
       const scaleB = requiredAmountB === 0n ? precision : (finalWalletAmountB * precision) / requiredAmountB;
       const scale = scaleA < scaleB ? scaleA : scaleB;
+
+      if (scale <= 0n) {
+        throw new Error(`No usable balance to open ${positionContext}`);
+      }
+
       const scaledAmountA = (requiredAmountA * scale) / precision;
       const scaledAmountB = (requiredAmountB * scale) / precision;
 
@@ -851,10 +901,7 @@ export class RebalanceService {
       const finalAmountA = scaledAmountA.toString();
       const finalAmountB = scaledAmountB.toString();
 
-      if (BigInt(finalAmountA) === 0n && BigInt(finalAmountB) === 0n) {
-        throw new Error(`Insufficient wallet balances to open ${positionContext}`);
-      }
-
+      logger.debug(`[DEBUG] Final amounts used: A=${finalAmountA} B=${finalAmountB}`);
       return {
         amountA: finalAmountA,
         amountB: finalAmountB,
@@ -1283,6 +1330,9 @@ export class RebalanceService {
     const requiredAmountA = (halfUsd * priceADenominator / priceANumerator).toString();
     const requiredAmountB = halfUsd.toString();
 
+    if (BigInt(requiredAmountA) === 0n && BigInt(requiredAmountB) === 0n) {
+      throw new Error('Invalid required amounts: check TOTAL_USD or price conversion');
+    }
     const amountA = (
       BigInt(requiredAmountA) * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
       INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR

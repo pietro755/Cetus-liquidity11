@@ -190,11 +190,13 @@ export class RebalanceService {
       // converted using the freshest available price.
       const currentPoolInfo = await this.monitorService.getPoolInfo(poolInfo.poolAddress);
       const required = this.computeInitialPositionTokenAmounts(currentPoolInfo);
+      const shouldFallbackToWalletBalance =
+        BigInt(required.requiredAmountA) === 0n && BigInt(required.requiredAmountB) === 0n;
       // When the TOTAL_USD budget is so small that integer arithmetic truncates
       // the computed amounts to zero, treat them as uncapped (undefined) so
       // capAmount falls back to the full wallet balance.  A zero cap would
       // otherwise prevent any tokens from being deposited.
-      const balancesAfterEnsure = await this.ensureBalances(
+      let balancesAfterEnsure = await this.ensureBalances(
         currentPoolInfo,
         lower,
         upper,
@@ -206,6 +208,24 @@ export class RebalanceService {
         },
         'initial position',
       );
+
+      if (
+        shouldFallbackToWalletBalance &&
+        BigInt(balancesAfterEnsure.amountA) === 0n &&
+        BigInt(balancesAfterEnsure.amountB) === 0n
+      ) {
+        const walletBalances = await this.readWalletTokenBalances(currentPoolInfo);
+        if (BigInt(walletBalances.amountA) > 0n || BigInt(walletBalances.amountB) > 0n) {
+          logger.warn(
+            'Initial position fallback resolved to zero deposit amounts — using fresh wallet balances instead',
+            {
+              walletAmountA: walletBalances.amountA,
+              walletAmountB: walletBalances.amountB,
+            },
+          );
+          balancesAfterEnsure = walletBalances;
+        }
+      }
 
       // Open the new position.
       const result = await this.openNewPosition(

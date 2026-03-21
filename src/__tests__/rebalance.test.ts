@@ -1996,6 +1996,74 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     expect(callArgs.amount_b).toBe('2818067929');
   });
 
+  it('re-reads wallet balances if the fallback path still resolves to zero amounts', async () => {
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
+    const monitor = makeMonitor([], pool);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '1',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      RouterV2: { getBestRouter: jest.fn().mockRejectedValue(new Error('aggregator unavailable')) },
+      Swap: { createSwapTransactionPayload: jest.fn().mockReturnValue(mockTxStub) },
+      Position: {
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn().mockResolvedValue({
+        effects: successEffect,
+        digest: '0xtx',
+        balanceChanges: [],
+        objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+      }),
+      getBalance: jest.fn().mockResolvedValue({ totalBalance: '0' }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? '972427' : '2818067929')),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    jest.spyOn(svc as any, 'ensureBalances').mockResolvedValue({ amountA: '0', amountB: '0' });
+    jest.spyOn(svc as any, 'readWalletTokenBalances').mockResolvedValue({
+      amountA: '972427',
+      amountB: '2818067929',
+    });
+
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    expect(callArgs.amount_a).toBe('972427');
+    expect(callArgs.amount_b).toBe('2818067929');
+  });
+
   it('uses post-step-1 wallet balance for step 2 when token A is depleted by gas', async () => {
     // Regression test for: "Add liquidity failed: InsufficientCoinBalance in command 0"
     //

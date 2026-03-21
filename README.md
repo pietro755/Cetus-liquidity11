@@ -76,6 +76,7 @@ flow in dry-run mode — all without any external network I/O.
 | `CHECK_INTERVAL` | | `60` | Seconds between checks |
 | `LOWER_TICK` | | auto | Lower tick for new position |
 | `UPPER_TICK` | | auto | Upper tick for new position |
+| `TOTAL_USD` | ✅ | — | Initial-position budget in tokenB base units (for example, `1000000` = 1.0 tokenB) |
 | `MAX_SLIPPAGE` | | `0.01` | Max slippage — must be > 0 and < 1 (i.e. 0–100 % exclusive) |
 | `GAS_BUDGET` | | `50000000` | Gas budget in MIST |
 | `LOG_LEVEL` | | `info` | `debug` \| `info` \| `warn` \| `error` |

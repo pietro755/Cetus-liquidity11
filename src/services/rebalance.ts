@@ -798,8 +798,7 @@ export class RebalanceService {
     if (isDeficitSwap && hadNonZeroBalanceChange) {
       if (!a2b && rawNewA <= bigA) {
         throw new Error('Swap failed: token A did not increase');
-      }
-      if (a2b && rawNewB <= bigB) {
+      } else if (a2b && rawNewB <= bigB) {
         throw new Error('Swap failed: token B did not increase');
       }
     }
@@ -887,7 +886,7 @@ export class RebalanceService {
       const scaleB = requiredAmountB === 0n ? precision : (finalWalletAmountB * precision) / requiredAmountB;
       const scale = scaleA < scaleB ? scaleA : scaleB;
 
-      if (scale <= 0n) {
+      if (scale === 0n) {
         throw new Error(`No usable balance to open ${positionContext}`);
       }
 

@@ -1514,7 +1514,8 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
 
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
-    expect(sdkService.getBalance).toHaveBeenCalledTimes(2);
+    // 2 initial reads + 2 post-step-1 re-reads inside openNewPosition
+    expect(sdkService.getBalance).toHaveBeenCalledTimes(4);
     // No swap was needed, so the swap-specific Sui balance reads are still unused.
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
@@ -1884,7 +1885,8 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     expect(callArgs.amount_b).toBe('4900000');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
-    expect(sdkService.getBalance).toHaveBeenCalledTimes(2);
+    // 2 initial reads + 2 post-step-1 re-reads inside openNewPosition
+    expect(sdkService.getBalance).toHaveBeenCalledTimes(4);
     // No swap was needed, so swap-specific Sui balance reads are still unused.
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
@@ -1904,7 +1906,8 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     expect(callArgs.amount_b).toBe('4900000');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
-    expect(sdkService.getBalance).toHaveBeenCalledTimes(2);
+    // 2 initial reads + 2 post-step-1 re-reads inside openNewPosition
+    expect(sdkService.getBalance).toHaveBeenCalledTimes(4);
     // No swap was needed, so swap-specific Sui balance reads are still unused.
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
@@ -1991,6 +1994,84 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
     expect(BigInt(callArgs.amount_a)).toBeGreaterThan(0n);
     expect(BigInt(callArgs.amount_b)).toBeGreaterThan(0n);
+  });
+
+  it('uses post-step-1 wallet balance for step 2 when token A is depleted by gas', async () => {
+    // Regression test for: "Add liquidity failed: InsufficientCoinBalance in command 0"
+    //
+    // Step 1 (openPositionTransactionPayload) consumes SUI gas.  If token A is
+    // SUI, its on-chain balance after step 1 is lower than what was read before
+    // step 1.  Step 2 (createAddLiquidityFixTokenPayload) must use the fresh
+    // post-step-1 balance, not the stale pre-step-1 balance.
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616', // 2^64 => priceA = 1 tokenB per 1 tokenA
+      tickSpacing: 10,
+    });
+    const monitor = makeMonitor([], pool);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '1',  // halfUsd = 0n — triggers full-wallet-balance fallback
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      RouterV2: { getBestRouter: jest.fn().mockRejectedValue(new Error('aggregator unavailable')) },
+      Swap: { createSwapTransactionPayload: jest.fn().mockReturnValue(mockTxStub) },
+      Position: {
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn().mockResolvedValue({
+        effects: successEffect,
+        digest: '0xtx',
+        balanceChanges: [],
+        objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+      }),
+      getBalance: jest.fn().mockResolvedValue({ totalBalance: '0' }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    // First 2 calls (before step 1): full balance.
+    // Subsequent calls (after step 1 consumed gas): reduced tokenA balance.
+    const PRE_STEP1_A  = '972427';
+    const POST_STEP1_A = '922427';  // 50_000 SUI base units consumed as gas
+    let balanceCallCount = 0;
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockImplementation((coinType: string) => {
+        balanceCallCount++;
+        const amountA = balanceCallCount <= 2 ? PRE_STEP1_A : POST_STEP1_A;
+        return Promise.resolve(coinType === '0xcoinA' ? amountA : '2818067929');
+      }),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    // Step 2 must use the post-step-1 (gas-depleted) balance, not the stale value.
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    expect(callArgs.amount_a).toBe(POST_STEP1_A);  // 922427, not 972427
+    expect(callArgs.amount_b).toBe('2818067929');
   });
 });
 
@@ -2087,7 +2168,8 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
     expect(callArgs.amount_a).toBe('2000000');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
-    expect(sdkService.getBalance).toHaveBeenCalledTimes(2);
+    // 2 initial reads + 2 post-step-1 re-reads inside openNewPosition
+    expect(sdkService.getBalance).toHaveBeenCalledTimes(4);
     // No swap was needed, so swap-specific Sui balance reads are still unused.
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });

@@ -998,8 +998,22 @@ export class RebalanceService {
     // any required swap. createAddLiquidityFixTokenPayload derives the correct
     // delta_liquidity from these amounts for the new tick range.
     // -----------------------------------------------------------------------
-    const bigAmtA = BigInt(amountA || '0');
-    const bigAmtB = BigInt(amountB || '0');
+
+    // Re-read wallet balances to account for gas consumed during step 1
+    // (creating the position NFT).  If one of the tokens is SUI, the gas
+    // payment reduces its balance between when we originally planned the
+    // amounts and when we execute step 2.  Using the stale (higher) amount
+    // causes InsufficientCoinBalance in the add-liquidity transaction.
+    const freshBalances = await this.readWalletTokenBalances(poolInfo);
+    const step2AmountA = BigInt(freshBalances.amountA || '0') < BigInt(amountA || '0')
+      ? freshBalances.amountA
+      : amountA;
+    const step2AmountB = BigInt(freshBalances.amountB || '0') < BigInt(amountB || '0')
+      ? freshBalances.amountB
+      : amountB;
+
+    const bigAmtA = BigInt(step2AmountA || '0');
+    const bigAmtB = BigInt(step2AmountB || '0');
 
     // Determine which token to fix for the add-liquidity call.
     //
@@ -1023,8 +1037,8 @@ export class RebalanceService {
 
     logger.info('Opening new position — step 2: deposit tokens', {
       positionId: newPositionId,
-      amountA,
-      amountB,
+      amountA: step2AmountA,
+      amountB: step2AmountB,
       fix_amount_a,
     });
 
@@ -1037,8 +1051,8 @@ export class RebalanceService {
           pos_id: newPositionId,
           coinTypeA: poolInfo.coinTypeA,
           coinTypeB: poolInfo.coinTypeB,
-          amount_a: amountA,
-          amount_b: amountB,
+          amount_a: step2AmountA,
+          amount_b: step2AmountB,
           fix_amount_a: fix_amount_a,
           slippage: this.config.maxSlippage,
           is_open: false,

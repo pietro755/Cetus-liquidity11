@@ -608,6 +608,8 @@ export class RebalanceService {
       balance: BigInt(c.balance),
     }));
 
+    await this.ensureRouterTokenMetadata(sdk, [fromCoin, toCoin]);
+
     // Try the Cetus aggregator first for optimal routing.
     let swapTx;
 
@@ -1469,5 +1471,51 @@ export class RebalanceService {
   /** Normalise coin type for comparison (lowercased, leading zeros stripped). */
   private normalizeCoinType(ct: string): string {
     return ct.toLowerCase().replace(/^0x0+/, '0x');
+  }
+
+  private async ensureRouterTokenMetadata(
+    sdk: any,
+    coinTypes: string[],
+  ): Promise<void> {
+    const router = sdk?.Router;
+    const tokenModule = sdk?.Token;
+    const coinAddressMap: Map<string, any> | undefined = router?._coinAddressMap;
+
+    if (
+      !router ||
+      typeof router.tokenInfo !== 'function' ||
+      !tokenModule ||
+      typeof tokenModule.getTokenListByCoinTypes !== 'function' ||
+      !coinAddressMap
+    ) {
+      return;
+    }
+
+    const missingCoinTypes = [...new Set(coinTypes)]
+      .filter(Boolean)
+      .filter((coinType: string) => !router.tokenInfo(coinType));
+
+    if (missingCoinTypes.length === 0) {
+      return;
+    }
+
+    try {
+      const tokenMap = await tokenModule.getTokenListByCoinTypes(missingCoinTypes);
+
+      for (const coinType of missingCoinTypes) {
+        const tokenInfo = tokenMap?.[coinType];
+
+        if (!tokenInfo) {
+          continue;
+        }
+
+        coinAddressMap.set(tokenInfo.address, tokenInfo);
+        coinAddressMap.set(this.normalizeCoinType(tokenInfo.address), tokenInfo);
+        coinAddressMap.set(coinType, tokenInfo);
+        coinAddressMap.set(this.normalizeCoinType(coinType), tokenInfo);
+      }
+    } catch (error) {
+      logger.warn('Failed to preload router token metadata for aggregator swap', error);
+    }
   }
 }

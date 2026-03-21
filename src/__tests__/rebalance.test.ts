@@ -2701,6 +2701,128 @@ describe('wallet balance checks before opening a new position', () => {
     }
   });
 
+  it('preloads router token metadata so the aggregator transaction can still be built', async () => {
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
+    const monitor = makeMonitor([], pool);
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '1000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+    const createSwapTransactionPayload = jest.fn().mockReturnValue(mockTxStub);
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+
+    const aggregatorResult = {
+      isExceed: false,
+      isTimeout: true,
+      inputAmount: 800000,
+      outputAmount: 750000,
+      fromCoin: '0xcoinA',
+      toCoin: '0xcoinB',
+      byAmountIn: true,
+      splitPaths: [{ percent: 100, inputAmount: 800000, outputAmount: 750000, pathIndex: 0, lastQuoteOutput: 0, basePaths: [] }],
+    };
+
+    const routerCoinMap = new Map<string, any>();
+    const tokenInfo = jest.fn((coinType: string) => routerCoinMap.get(coinType));
+
+    const mockSdk = {
+      RouterV2: {
+        getBestRouter: jest.fn().mockResolvedValue({ result: aggregatorResult, version: 'v1' }),
+      },
+      Router: {
+        tokenInfo,
+        _coinAddressMap: routerCoinMap,
+      },
+      Token: {
+        getTokenListByCoinTypes: jest.fn().mockResolvedValue({
+          '0xcoinA': { address: '0xcoinA', decimals: 9, symbol: 'COINA' },
+          '0xcoinB': { address: '0xcoinB', decimals: 6, symbol: 'COINB' },
+        }),
+      },
+      Swap: {
+        createSwapTransactionPayload,
+      },
+      Position: {
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    let getBalanceCallCount = 0;
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xswap',
+          balanceChanges: [],
+        })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 2) {
+          return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '800000' : '0' });
+        }
+        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? POST_SWAP_BALANCE : POST_SWAP_BALANCE });
+      }),
+      getCoins: jest.fn().mockResolvedValue({ data: [{ coinType: '0xcoinA', coinObjectId: '0xcoin', balance: '800000' }] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    let sdkBalanceCallCount = 0;
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockImplementation((coinType: string) => {
+        sdkBalanceCallCount++;
+        if (sdkBalanceCallCount <= 2) {
+          return Promise.resolve(coinType === '0xcoinA' ? '800000' : '0');
+        }
+        return Promise.resolve(coinType === '0xcoinA' ? POST_SWAP_BALANCE : POST_SWAP_BALANCE);
+      }),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const buildAggSpy = jest
+      .spyOn(TransactionUtil, 'buildAggregatorSwapTransaction')
+      .mockImplementation(async (sdkArg: any) => {
+        expect(sdkArg.Router.tokenInfo('0xcoinA')?.decimals).toBe(9);
+        expect(sdkArg.Router.tokenInfo('0xcoinB')?.decimals).toBe(6);
+        return mockTxStub as any;
+      });
+
+    try {
+      const svc = new RebalanceService(sdkService, monitor, config);
+      const result = await svc.checkAndRebalance('0xpool');
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(true);
+      expect(mockSdk.Token.getTokenListByCoinTypes).toHaveBeenCalledWith(['0xcoinA', '0xcoinB']);
+      expect(createSwapTransactionPayload).not.toHaveBeenCalled();
+      expect(buildAggSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      buildAggSpy.mockRestore();
+    }
+  });
+
   it('fails gracefully when neither required token is available in the wallet', async () => {
     process.env.DRY_RUN = 'false';
 

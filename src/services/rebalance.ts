@@ -213,7 +213,7 @@ export class RebalanceService {
       }
 
       // Open the new position.
-      const result = await this.createPosition(
+      const result = await this.openNewPosition(
         currentPoolInfo,
         lower,
         upper,
@@ -319,7 +319,7 @@ export class RebalanceService {
       );
 
       // Step 4: Open new position, reusing the exact stored liquidity value.
-      const result = await this.createPosition(
+      const result = await this.openNewPosition(
         poolInfo,
         lower,
         upper,
@@ -451,12 +451,12 @@ export class RebalanceService {
     poolInfo: PoolInfo,
     tickLower: number,
     tickUpper: number,
-    requiredAmounts?: { requiredAmountA: string; requiredAmountB: string },
-  ): Promise<{ amountA: string; amountB: string }> {
+    requiredAmounts: { requiredAmountA: string; requiredAmountB: string },
+  ): Promise<{ amountA: string; amountB: string; didSwap: boolean }> {
     const bigA = BigInt(amountA || '0');
     const bigB = BigInt(amountB || '0');
 
-    if (bigA === 0n && bigB === 0n) return { amountA, amountB };
+    if (bigA === 0n && bigB === 0n) return { amountA, amountB, didSwap: false };
 
     const currentTick = poolInfo.currentTickIndex;
     const priceIsBelowRange = currentTick < tickLower;
@@ -464,8 +464,8 @@ export class RebalanceService {
 
     let a2b = false;
     let swapAmount = 0n;
-    const requiredAmountA = BigInt(requiredAmounts?.requiredAmountA || '0');
-    const requiredAmountB = BigInt(requiredAmounts?.requiredAmountB || '0');
+    const requiredAmountA = BigInt(requiredAmounts.requiredAmountA);
+    const requiredAmountB = BigInt(requiredAmounts.requiredAmountB);
     const missingA = bigA < requiredAmountA;
     const missingB = bigB < requiredAmountB;
 
@@ -499,18 +499,20 @@ export class RebalanceService {
       // the maximum amount is available for deposit (including any B received from
       // fees when the previous position was still in range).
       if (bigB > 0n) {
-        a2b = false; swapAmount = bigB; // swap ALL B→A
+        a2b = false;
+        swapAmount = bigB; // swap ALL B→A
       } else {
-        return { amountA, amountB }; // only A (or nothing) — no swap needed
+          return { amountA, amountB, didSwap: false }; // only A (or nothing) — no swap needed
       }
     } else if (swapAmount === 0n && priceIsAboveRange) {
       // Position only accepts token B above range — swap ALL token A to B so that
       // the maximum amount is available for deposit (including any A received from
       // fees when the previous position was still in range).
       if (bigA > 0n) {
-        a2b = true; swapAmount = bigA; // swap ALL A→B
+        a2b = true;
+        swapAmount = bigA; // swap ALL A→B
       } else {
-        return { amountA, amountB }; // only B (or nothing) — no swap needed
+          return { amountA, amountB, didSwap: false }; // only B (or nothing) — no swap needed
       }
     } else if (swapAmount === 0n) {
       // In-range position needs both tokens.
@@ -518,7 +520,7 @@ export class RebalanceService {
         // Both tokens available — no swap needed; the fix_amount_a bottleneck
         // logic in openNewPosition will handle the ratio correctly.
         logger.info('Both tokens available — no swap needed');
-        return { amountA, amountB };
+        return { amountA, amountB, didSwap: false };
       }
       // One token is zero — compute the CLMM-optimal swap amount so the
       // resulting token ratio exactly matches what the target tick range
@@ -549,8 +551,13 @@ export class RebalanceService {
 
       if (sqrtPBig <= sqrtPaCalc || sqrtPBig >= sqrtPbCalc || denominator <= 0n) {
         // Degenerate / inconsistent data — fall back to the half heuristic.
-        if (bigA > 0n) { a2b = true;  swapAmount = bigA / 2n; }
-        else            { a2b = false; swapAmount = bigB / 2n; }
+        if (bigA > 0n) {
+          a2b = true;
+          swapAmount = bigA / 2n;
+        } else {
+          a2b = false;
+          swapAmount = bigB / 2n;
+        }
       } else if (bigA > 0n) {
         a2b = true;
         swapAmount = bigA * sqrtPbCalc * (sqrtPBig - sqrtPaCalc) / denominator;
@@ -558,31 +565,28 @@ export class RebalanceService {
         a2b = false;
         swapAmount = bigB * sqrtPBig * (sqrtPbCalc - sqrtPBig) / denominator;
       }
-      if (swapAmount === 0n) return { amountA, amountB };
+      if (swapAmount === 0n) return { amountA, amountB, didSwap: false };
     }
 
-    logger.info('Swapping X → Y to satisfy position requirements', {
-      fromToken: a2b ? 'tokenA' : 'tokenB',
-      toToken: a2b ? 'tokenB' : 'tokenA',
-      swapAmount: swapAmount.toString(),
-    });
-    logger.info('Swapping tokens to correct ratio via Cetus aggregator', {
+    const fromCoin = a2b ? poolInfo.coinTypeA : poolInfo.coinTypeB;
+    const toCoin   = a2b ? poolInfo.coinTypeB : poolInfo.coinTypeA;
+
+    logger.info('Swapping tokens to satisfy position requirements', {
+      fromTokenType: fromCoin,
+      toTokenType: toCoin,
       direction: a2b ? 'A→B' : 'B→A',
       swapAmount: swapAmount.toString(),
     });
 
     if (this.dryRun) {
       logger.info('[DRY RUN] Would swap tokens via aggregator');
-      return { amountA, amountB };
+      return { amountA, amountB, didSwap: true };
     }
 
     const sdk = this.sdkService.getSdk();
     const keypair = this.sdkService.getKeypair();
     const suiClient = this.sdkService.getSuiClient();
     const ownerAddress = this.sdkService.getAddress();
-
-    const fromCoin = a2b ? poolInfo.coinTypeA : poolInfo.coinTypeB;
-    const toCoin   = a2b ? poolInfo.coinTypeB : poolInfo.coinTypeA;
 
     // Fetch coin objects for the from-coin (needed by the aggregator transaction builder)
     const fromCoinsResponse = await suiClient.getCoins({ owner: ownerAddress, coinType: fromCoin });
@@ -753,28 +757,7 @@ export class RebalanceService {
     const newAmountB = (rawNewB < 0n ? 0n : rawNewB).toString();
 
     logger.info('Swap completed', { digest: swapResult.digest, newAmountA, newAmountB });
-    return { amountA: newAmountA, amountB: newAmountB };
-  }
-
-  private async performSwapIfNeeded(
-    balances: { amountA: string; amountB: string },
-    poolInfo: PoolInfo,
-    tickLower: number,
-    tickUpper: number,
-    required: { requiredAmountA: string; requiredAmountB: string },
-  ): Promise<{ didSwap: boolean; adjusted: { amountA: string; amountB: string } }> {
-    const adjusted = await this.swapTokensIfNeeded(
-      balances.amountA,
-      balances.amountB,
-      poolInfo,
-      tickLower,
-      tickUpper,
-      required,
-    );
-    return {
-      didSwap: adjusted.amountA !== balances.amountA || adjusted.amountB !== balances.amountB,
-      adjusted,
-    };
+    return { amountA: newAmountA, amountB: newAmountB, didSwap: true };
   }
 
   private async ensureBalances(
@@ -795,8 +778,9 @@ export class RebalanceService {
       BigInt(walletBalances.amountA) < BigInt(amounts.requiredAmountA) ||
       BigInt(walletBalances.amountB) < BigInt(amounts.requiredAmountB);
 
-    const swapResult = await this.performSwapIfNeeded(
-      walletBalances,
+    const swapResult = await this.swapTokensIfNeeded(
+      walletBalances.amountA,
+      walletBalances.amountB,
       poolInfo,
       tickLower,
       tickUpper,
@@ -819,29 +803,24 @@ export class RebalanceService {
       };
     }
 
-    await this.readWalletTokenBalances(poolInfo);
+    const refreshedBalances = await this.readWalletTokenBalances(poolInfo);
+    logger.info('Refreshed wallet balances after swap', {
+      positionContext,
+      refreshedAmountA: refreshedBalances.amountA,
+      refreshedAmountB: refreshedBalances.amountB,
+    });
     return {
-      amountA: this.capAmount(swapResult.adjusted.amountA, amounts.usableAmountA),
-      amountB: this.capAmount(swapResult.adjusted.amountB, amounts.usableAmountB),
+      amountA: this.computeFinalAmount(
+        refreshedBalances.amountA,
+        swapResult.amountA,
+        amounts.usableAmountA,
+      ),
+      amountB: this.computeFinalAmount(
+        refreshedBalances.amountB,
+        swapResult.amountB,
+        amounts.usableAmountB,
+      ),
     };
-  }
-
-  private createPosition(
-    poolInfo: PoolInfo,
-    tickLower: number,
-    tickUpper: number,
-    amountA: string,
-    amountB: string,
-    storedLiquidity?: string,
-  ): Promise<{ transactionDigest?: string; positionId?: string }> {
-    return this.openNewPosition(
-      poolInfo,
-      tickLower,
-      tickUpper,
-      amountA,
-      amountB,
-      storedLiquidity,
-    );
   }
 
   // ---------------------------------------------------------------------------
@@ -876,7 +855,7 @@ export class RebalanceService {
     }
 
     if (BigInt(amountA) === 0n && BigInt(amountB) === 0n) {
-      throw new Error('Insufficient wallet balances to open new position after automatic balance checks');
+      throw new Error('Insufficient wallet balances to open new position after swap attempt');
     }
 
     // Only validate stored liquidity when it is explicitly provided (rebalance path).
@@ -1176,12 +1155,24 @@ export class RebalanceService {
     return { amountA: walletBalanceA, amountB: walletBalanceB };
   }
 
-  private minAmount(a: string, b: string): string {
+  private getMinimumOfTwoAmounts(a: string, b: string): string {
     return BigInt(a) < BigInt(b) ? a : b;
   }
 
   private capAmount(amount: string, cap?: string): string {
-    return cap === undefined ? amount : this.minAmount(amount, cap);
+    return cap === undefined ? amount : this.getMinimumOfTwoAmounts(amount, cap);
+  }
+
+  private computeFinalAmount(
+    refreshedAmount: string,
+    adjustedAmount: string,
+    cap?: string,
+  ): string {
+    // We reconcile SDK-derived swap deltas with an explicit post-confirmation
+    // wallet read and keep the smaller amount to avoid over-spending when
+    // full-node balance visibility lags behind local swap math.
+    const reconciled = this.getMinimumOfTwoAmounts(refreshedAmount, adjustedAmount);
+    return this.capAmount(reconciled, cap);
   }
 
   private computeInitialPositionTokenAmounts(

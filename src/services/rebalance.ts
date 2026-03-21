@@ -9,6 +9,7 @@ import type { BalanceChange } from '@mysten/sui/client';
 
 const INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR = 98n;
 const INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR = 100n;
+const TWO_128 = 2n ** 128n;
 
 export interface RebalanceResult {
   success: boolean;
@@ -1380,7 +1381,6 @@ export class RebalanceService {
   } {
     const totalUsd = BigInt(this.config.totalUsd);
     const sqrtP = BigInt(poolInfo.currentSqrtPrice);
-    const two128 = 2n ** 128n;
     const priceANumerator = sqrtP * sqrtP;
 
     if (priceANumerator === 0n) {
@@ -1388,7 +1388,9 @@ export class RebalanceService {
     }
 
     if (poolInfo.currentTickIndex < tickLower) {
-      const requiredAmountABigInt = totalUsd * two128 / priceANumerator;
+      // Use bigint floor division intentionally: on-chain token amounts are integer
+      // base units, so rounding down is the only safe way to avoid over-spending.
+      const requiredAmountABigInt = totalUsd * TWO_128 / priceANumerator;
       const amountABigInt =
         requiredAmountABigInt * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
         INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR;
@@ -1412,7 +1414,7 @@ export class RebalanceService {
         totalUsd * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
         INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR;
 
-      if (totalUsd === 0n || amountBBigInt === 0n) {
+      if (amountBBigInt === 0n) {
         throw new Error(
           `TOTAL_USD (${this.config.totalUsd}) is too small to create a rebalanced position above range at the current pool price.`,
         );

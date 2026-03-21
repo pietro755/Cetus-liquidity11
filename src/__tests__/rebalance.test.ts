@@ -1051,7 +1051,7 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
   const SQRT_PRICE_TICK_100 = '18539204128674405812';
   const SQRT_PRICE_TICK_700 = '19103778296503601288';
 
-  it('fixes token A (fix_amount_a=true) when rebalance caps make A the bottleneck in range', async () => {
+  it('fixes token A (fix_amount_a=true) when the TOTAL_USD-derived rebalance caps make A the bottleneck in range', async () => {
     const args = await runAndCaptureFixToken(500, SQRT_PRICE_TICK_500, 400, 600, '2000000', '1000000');
     expect(args.fix_amount_a).toBe(true);
   });
@@ -1216,6 +1216,9 @@ describe('rebalance – both tokens present with out-of-range new position trigg
       '800000',   // tokenAmountB (must swap ALL of this to A)
     );
     expect(swap.a2b).toBe(false);          // B → A
+    // TOTAL_USD=1,000,000 below range targets the full budget in token A:
+    // requiredA = floor(1,000,000 * 2^128 / sqrtPrice^2) = 951,231.
+    // Starting from 500,000 A, the exact-out deficit is therefore 451,231 A.
     expect(swap.amount).toBe('451231');
   });
 
@@ -1228,6 +1231,8 @@ describe('rebalance – both tokens present with out-of-range new position trigg
       '500000',   // tokenAmountB (already have some B)
     );
     expect(swap.a2b).toBe(true);           // A → B
+    // Above range, the full TOTAL_USD budget maps to token B only, so the exact-out
+    // deficit equals 500,000 B when the wallet already holds 500,000 B.
     expect(swap.amount).toBe('500000');
   });
 });

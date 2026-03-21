@@ -1330,7 +1330,11 @@ export class RebalanceService {
     const requiredAmountB = halfUsd.toString();
 
     if (BigInt(requiredAmountA) === 0n && BigInt(requiredAmountB) === 0n) {
-      throw new Error('Invalid required amounts: check TOTAL_USD or price conversion');
+      logger.warn(
+        'TOTAL_USD is too small for integer arithmetic — both required amounts truncated to zero.' +
+        ' Falling back to full wallet balance for initial position.',
+        { totalUsd: this.config.totalUsd },
+      );
     }
     const amountA = (
       BigInt(requiredAmountA) * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /

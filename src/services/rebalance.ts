@@ -9,6 +9,7 @@ import type { BalanceChange } from '@mysten/sui/client';
 
 const INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR = 98n;
 const INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR = 100n;
+const TWO_128 = 2n ** 128n;
 
 export interface RebalanceResult {
   success: boolean;
@@ -296,14 +297,17 @@ export class RebalanceService {
       // Step 1: Remove liquidity from the out-of-range position.
       await this.removeLiquidity(position.positionId, storedLiquidity, poolInfo);
 
-      const balances = await this.getWalletTokenAmountsForPosition(poolInfo, 'rebalanced position');
+      const balances = await this.readWalletTokenBalances(poolInfo);
+      const required = this.computeRebalancedPositionTokenAmounts(poolInfo, lower, upper);
       const adjusted = await this.ensureBalances(
         poolInfo,
         lower,
         upper,
         {
-          requiredAmountA: balances.amountA,
-          requiredAmountB: balances.amountB,
+          requiredAmountA: required.requiredAmountA,
+          requiredAmountB: required.requiredAmountB,
+          usableAmountA: required.amountA !== '0' ? required.amountA : undefined,
+          usableAmountB: required.amountB !== '0' ? required.amountB : undefined,
         },
         'rebalanced position',
         balances,
@@ -1363,6 +1367,68 @@ export class RebalanceService {
     });
 
     return { requiredAmountA, requiredAmountB, amountA, amountB };
+  }
+
+  private computeRebalancedPositionTokenAmounts(
+    poolInfo: PoolInfo,
+    tickLower: number,
+    tickUpper: number,
+  ): {
+    requiredAmountA: string;
+    requiredAmountB: string;
+    amountA: string;
+    amountB: string;
+  } {
+    const totalUsd = BigInt(this.config.totalUsd);
+    const sqrtP = BigInt(poolInfo.currentSqrtPrice);
+    const priceANumerator = sqrtP * sqrtP;
+
+    if (priceANumerator === 0n) {
+      throw new Error('Cannot compute token amounts for rebalanced position: pool price is zero');
+    }
+
+    if (poolInfo.currentTickIndex < tickLower) {
+      // Use bigint floor division intentionally: on-chain token amounts are integer
+      // base units, so rounding down is the only safe way to avoid over-spending.
+      const requiredAmountABigInt = totalUsd * TWO_128 / priceANumerator;
+      const amountABigInt =
+        requiredAmountABigInt * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
+        INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR;
+
+      if (requiredAmountABigInt === 0n || amountABigInt === 0n) {
+        throw new Error(
+          `TOTAL_USD (${this.config.totalUsd}) is too small to create a rebalanced position below range at the current pool price.`,
+        );
+      }
+
+      return {
+        requiredAmountA: requiredAmountABigInt.toString(),
+        requiredAmountB: '0',
+        amountA: amountABigInt.toString(),
+        amountB: '0',
+      };
+    }
+
+    if (poolInfo.currentTickIndex >= tickUpper) {
+      const amountBBigInt =
+        totalUsd * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
+        INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR;
+
+      if (amountBBigInt === 0n) {
+        throw new Error(
+          `TOTAL_USD (${this.config.totalUsd}) is too small to create a rebalanced position above range at the current pool price.`,
+        );
+      }
+
+      return {
+        requiredAmountA: '0',
+        requiredAmountB: totalUsd.toString(),
+        amountA: '0',
+        amountB: amountBBigInt.toString(),
+      };
+    }
+
+    return this.computeInitialPositionTokenAmounts(poolInfo);
   }
 
   // ---------------------------------------------------------------------------

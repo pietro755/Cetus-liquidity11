@@ -325,7 +325,11 @@ describe('rebalance – live path uses fix-token add-liquidity', () => {
   it('calls createAddLiquidityFixTokenPayload with env-configured amounts, not delta_liquidity', async () => {
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
     const monitor = makeMonitor([pos], pool);
     (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
@@ -405,9 +409,9 @@ describe('rebalance – live path uses fix-token add-liquidity', () => {
     expect(callArgs).toHaveProperty('coinTypeA', pool.coinTypeA);
     expect(callArgs).toHaveProperty('coinTypeB', pool.coinTypeB);
 
-    // amount_a and amount_b must equal the exact env-configured values.
-    expect(callArgs.amount_a).toBe('1000000');
-    expect(callArgs.amount_b).toBe('1000000');
+    // TOTAL_USD=1,000,000 and priceA=1 => 490,000 buffered per token.
+    expect(callArgs.amount_a).toBe('490000');
+    expect(callArgs.amount_b).toBe('490000');
 
     // fix_amount_a must be a boolean.
     expect(typeof callArgs.fix_amount_a).toBe('boolean');
@@ -430,7 +434,11 @@ describe('rebalance – step 2 retries on "not available for consumption"', () =
   it('succeeds after one retryable failure in add-liquidity', async () => {
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
     const monitor = makeMonitor([pos], pool);
     (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
@@ -508,7 +516,11 @@ describe('rebalance – openNewPosition input validation', () => {
   function makeValidationScenario(configOverride: Record<string, unknown> = {}) {
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
     const monitor = makeMonitor([pos], pool);
     (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
@@ -591,7 +603,11 @@ describe('rebalance – openNewPosition input validation', () => {
   it('logs all params and re-throws when createAddLiquidityFixTokenPayload fails', async () => {
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
     const monitor = makeMonitor([pos], pool);
     (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
@@ -662,7 +678,11 @@ describe('rebalance – position object verification before add-liquidity', () =
   function makeVerificationScenario(getObjectMock: jest.Mock) {
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
     const monitor = makeMonitor([pos], pool);
     (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
@@ -787,7 +807,11 @@ describe('rebalance – position object verification before add-liquidity', () =
     // and throwing "Could not find new position ID".
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
     const monitor = makeMonitor([pos], pool);
     (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
@@ -857,7 +881,11 @@ describe('rebalance – position object verification before add-liquidity', () =
     // immediately rather than passing the bad ID to add-liquidity.
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
     const monitor = makeMonitor([pos], pool);
     (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
@@ -969,7 +997,7 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
       maxSlippage: 0.01,
       lowerTick: tickLower,
       upperTick: tickUpper,
-      totalUsd: '999999999999999', // large enough to not trigger scaling
+      totalUsd: '1000000',
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -1023,11 +1051,9 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
   const SQRT_PRICE_TICK_100 = '18539204128674405812';
   const SQRT_PRICE_TICK_700 = '19103778296503601288';
 
-  it('fixes token B (fix_amount_a=false) when A is the liquidity-excess token (both tokens, in range)', async () => {
-    // tokenAmountA=2000000, tokenAmountB=1000000 at tick 500 in range [400,600]:
-    // L_a > L_b → B is the bottleneck → fix B (fix_amount_a=false)
+  it('fixes token A (fix_amount_a=true) when the TOTAL_USD-derived rebalance caps make A the bottleneck in range', async () => {
     const args = await runAndCaptureFixToken(500, SQRT_PRICE_TICK_500, 400, 600, '2000000', '1000000');
-    expect(args.fix_amount_a).toBe(false);
+    expect(args.fix_amount_a).toBe(true);
   });
 
   it('fixes token A (fix_amount_a=true) when B is the liquidity-excess token (both tokens, in range)', async () => {
@@ -1102,7 +1128,7 @@ describe('rebalance – both tokens present with out-of-range new position trigg
       maxSlippage: 0.01,
       lowerTick: tickLower,
       upperTick: tickUpper,
-      totalUsd: '999999999999999', // large enough to not trigger scaling
+      totalUsd: '1000000',
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -1150,7 +1176,12 @@ describe('rebalance – both tokens present with out-of-range new position trigg
       getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
         getBalanceCallCount++;
         if (getBalanceCallCount <= 2) return Promise.resolve({ totalBalance: '0' });
-        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? tokenAmountA : tokenAmountB });
+        if (currentTickIndex < tickLower) {
+          const totalA = (BigInt(tokenAmountA) + BigInt(tokenAmountB)).toString();
+          return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? totalA : '0' });
+        }
+        const totalB = (BigInt(tokenAmountA) + BigInt(tokenAmountB)).toString();
+        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '0' : totalB });
       }),
       getCoins: jest.fn().mockResolvedValue({ data: [] }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos' } }),
@@ -1176,9 +1207,7 @@ describe('rebalance – both tokens present with out-of-range new position trigg
     return { a2b: swapArgs.a2b, amount: swapArgs.amount };
   }
 
-  it('swaps ALL token B to A when both tokens are present but price is below the new range', async () => {
-    // Both env amounts are non-zero. New range is below current price — only token A accepted.
-    // The bot must convert all B to A rather than leaving it unused.
+  it('swaps only the token-B deficit needed to restore the below-range target allocation', async () => {
     const swap = await runAndCaptureSwap(
       100,   // currentTick — below range [400,600]
       400,   // tickLower
@@ -1187,12 +1216,13 @@ describe('rebalance – both tokens present with out-of-range new position trigg
       '800000',   // tokenAmountB (must swap ALL of this to A)
     );
     expect(swap.a2b).toBe(false);          // B → A
-    expect(swap.amount).toBe('800000');    // swap the full B amount
+    // TOTAL_USD=1,000,000 below range targets the full budget in token A:
+    // requiredA = floor(1,000,000 * 2^128 / sqrtPrice^2) = 951,231.
+    // Starting from 500,000 A, the exact-out deficit is therefore 451,231 A.
+    expect(swap.amount).toBe('451231');
   });
 
-  it('swaps ALL token A to B when both tokens are present but price is above the new range', async () => {
-    // Both env amounts are non-zero. New range is above current price — only token B accepted.
-    // The bot must convert all A to B rather than leaving it unused.
+  it('swaps only the token-A deficit needed to restore the above-range target allocation', async () => {
     const swap = await runAndCaptureSwap(
       700,   // currentTick — above range [400,600]
       400,   // tickLower
@@ -1201,7 +1231,9 @@ describe('rebalance – both tokens present with out-of-range new position trigg
       '500000',   // tokenAmountB (already have some B)
     );
     expect(swap.a2b).toBe(true);           // A → B
-    expect(swap.amount).toBe('800000');    // swap the full A amount
+    // Above range, the full TOTAL_USD budget maps to token B only, so the exact-out
+    // deficit equals 500,000 B when the wallet already holds 500,000 B.
+    expect(swap.amount).toBe('500000');
   });
 });
 
@@ -1248,7 +1280,7 @@ describe('rebalance – CLMM-optimal swap amount for in-range single-token case'
       maxSlippage: 0.01,
       lowerTick: tickLower,
       upperTick: tickUpper,
-      totalUsd: '999999999999999', // large enough to not trigger scaling
+      totalUsd: '1000000',
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -1295,7 +1327,7 @@ describe('rebalance – CLMM-optimal swap amount for in-range single-token case'
       getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
         getBalanceCallCount++;
         if (getBalanceCallCount <= 2) return Promise.resolve({ totalBalance: '0' });
-        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? tokenAmountA : tokenAmountB });
+        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '500000' : '500000' });
       }),
       getCoins: jest.fn().mockResolvedValue({ data: [] }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos' } }),
@@ -1401,12 +1433,11 @@ describe('rebalance – CLMM-optimal swap amount for in-range single-token case'
 
     expect(swap.a2b).toBe(true); // A → B
 
-    // The optimal swap is significantly LESS than half because the position
-    // needs mostly A.  The naive half-swap would leave far too much B and
-    // too little A, reducing achieved liquidity.
+    // The optimal swap must never exceed the old half-swap heuristic and may
+    // equal it once the env-defined rebalance target is applied as the cap.
     const swapAmt = BigInt(swap.amount);
     expect(swapAmt).toBeGreaterThan(0n);
-    expect(swapAmt).toBeLessThan(500_000n); // strictly less than the "half" heuristic
+    expect(swapAmt).toBeLessThanOrEqual(500_000n);
   });
 
   it('swaps a smaller B fraction when the new range is skewed toward B (near upper tick)', async () => {
@@ -1446,10 +1477,14 @@ describe('rebalance – CLMM-optimal swap amount for in-range single-token case'
 describe('rebalance – configured amounts capped by wallet balance', () => {
   afterEach(() => { delete process.env.DRY_RUN; });
 
-  it('uses wallet amounts for rebalanced position when wallet value is below TOTAL_USD', async () => {
+  it('caps rebalanced position amounts to the env-defined TOTAL_USD target', async () => {
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
     const monitor = makeMonitor([pos], pool);
     (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
@@ -1491,7 +1526,7 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
       getBalance: jest.fn().mockImplementation((coinType: string) =>
-        Promise.resolve(coinType === '0xcoinA' ? '2000000' : '3000000')),
+        Promise.resolve(coinType === '0xcoinA' ? '7000000' : '7000000')),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
@@ -1508,9 +1543,9 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
       amount_a: string; amount_b: string;
     };
 
-    // Wallet value (≈3000000 tokenB) is below TOTAL_USD (10000000) — full wallet balances used.
-    expect(callArgs.amount_a).toBe('2000000');
-    expect(callArgs.amount_b).toBe('3000000');
+    // TOTAL_USD=10,000,000 and priceA=1 => 4,900,000 buffered per token.
+    expect(callArgs.amount_a).toBe('4900000');
+    expect(callArgs.amount_b).toBe('4900000');
 
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
@@ -1520,10 +1555,14 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
 
-  it('uses full wallet balances when wallet value is below TOTAL_USD', async () => {
+  it('does not expand rebalanced position amounts beyond the env-defined TOTAL_USD target', async () => {
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
     const monitor = makeMonitor([pos], pool);
     (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
@@ -1565,7 +1604,7 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
       getBalance: jest.fn().mockImplementation((coinType: string) =>
-        Promise.resolve(coinType === '0xcoinA' ? '1500000' : '2500000')),
+        Promise.resolve(coinType === '0xcoinA' ? '9999999' : '9999999')),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
@@ -1580,9 +1619,8 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0] as {
       amount_a: string; amount_b: string;
     };
-    // Wallet value (≈2500000 tokenB) < TOTAL_USD (10000000) → full wallet balances used.
-    expect(callArgs.amount_a).toBe('1500000');
-    expect(callArgs.amount_b).toBe('2500000');
+    expect(callArgs.amount_a).toBe('4900000');
+    expect(callArgs.amount_b).toBe('4900000');
   });
 
   it('produces identical amounts across multiple rebalances (deterministic)', async () => {
@@ -1590,7 +1628,11 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     // proving the bot is deterministic and not accumulating state.
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
     const monitor = makeMonitor([pos], pool);
     (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
@@ -1633,7 +1675,7 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     const sdkService1 = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
       getBalance: jest.fn().mockImplementation((coinType: string) =>
-        Promise.resolve(coinType === '0xcoinA' ? '1500000' : '2500000')),
+        Promise.resolve(coinType === '0xcoinA' ? '7000000' : '7000000')),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient1),
@@ -1648,7 +1690,7 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     const sdkService2 = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
       getBalance: jest.fn().mockImplementation((coinType: string) =>
-        Promise.resolve(coinType === '0xcoinA' ? '1500000' : '2500000')),
+        Promise.resolve(coinType === '0xcoinA' ? '9000000' : '8000000')),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient2),
@@ -1663,10 +1705,10 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(2);
     const args1 = createAddLiquidityFixTokenPayload.mock.calls[0][0] as { amount_a: string; amount_b: string };
     const args2 = createAddLiquidityFixTokenPayload.mock.calls[1][0] as { amount_a: string; amount_b: string };
-    expect(args1.amount_a).toBe('1500000');
-    expect(args1.amount_b).toBe('2500000');
-    expect(args2.amount_a).toBe('1500000');
-    expect(args2.amount_b).toBe('2500000');
+    expect(args1.amount_a).toBe('4900000');
+    expect(args1.amount_b).toBe('4900000');
+    expect(args2.amount_a).toBe('4900000');
+    expect(args2.amount_b).toBe('4900000');
   });
 });
 
@@ -2157,7 +2199,11 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
   }) {
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
     // Position is below current tick → out of range.
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
     const monitor = makeMonitor([pos], pool);
@@ -2214,9 +2260,9 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
     return { monitor, config, sdkService, createAddLiquidityFixTokenPayload, mockSuiClient };
   }
 
-  it('uses wallet token A balance during rebalance when wallet value is below TOTAL_USD', async () => {
+  it('caps token A during rebalance at the env-defined TOTAL_USD target', async () => {
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload, mockSuiClient } =
-      makeRebalanceEnvAmountScenario({ walletAmountA: '2000000', walletAmountB: '3000000' });
+      makeRebalanceEnvAmountScenario({ walletAmountA: '7000000', walletAmountB: '7000000' });
 
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
@@ -2225,8 +2271,7 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
     expect(result!.success).toBe(true);
 
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // Wallet value (≈3000000 tokenB) < TOTAL_USD (10000000) → full wallet balances used.
-    expect(callArgs.amount_a).toBe('2000000');
+    expect(callArgs.amount_a).toBe('4900000');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
     // 2 initial reads + 2 post-step-1 re-reads inside openNewPosition
@@ -2235,9 +2280,9 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
 
-  it('uses wallet token B balance during rebalance when wallet value is below TOTAL_USD', async () => {
+  it('caps token B during rebalance at the env-defined TOTAL_USD target', async () => {
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
-      makeRebalanceEnvAmountScenario({ walletAmountA: '1000000', walletAmountB: '1500000' });
+      makeRebalanceEnvAmountScenario({ walletAmountA: '7000000', walletAmountB: '7000000' });
 
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
@@ -2246,11 +2291,10 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
     expect(result!.success).toBe(true);
 
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // Wallet value (≈1500000 tokenB) < TOTAL_USD (10000000) → full wallet balances used.
-    expect(callArgs.amount_b).toBe('1500000');
+    expect(callArgs.amount_b).toBe('4900000');
   });
 
-  it('uses full wallet balances during rebalance when TOTAL_USD exceeds wallet value', async () => {
+  it('uses identical env-defined amounts across repeated rebalances', async () => {
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
       makeRebalanceEnvAmountScenario({ walletAmountA: '9999999', walletAmountB: '9999999' });
 
@@ -2261,25 +2305,8 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
     expect(result!.success).toBe(true);
 
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // Full wallet balances pass through when wallet value is below TOTAL_USD.
-    expect(callArgs.amount_a).toBe('9999999');
-    expect(callArgs.amount_b).toBe('9999999');
-  });
-
-  it('produces identical amounts across multiple rebalances (deterministic)', async () => {
-    // Both rebalances must produce identical amounts.
-    const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
-      makeRebalanceEnvAmountScenario({ walletAmountA: '4000000', walletAmountB: '6000000' });
-
-    const svc = new RebalanceService(sdkService, monitor, config);
-    const result = await svc.checkAndRebalance('0xpool');
-
-    expect(result).not.toBeNull();
-    expect(result!.success).toBe(true);
-
-    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    expect(callArgs.amount_a).toBe('4000000');
-    expect(callArgs.amount_b).toBe('6000000');
+    expect(callArgs.amount_a).toBe('4900000');
+    expect(callArgs.amount_b).toBe('4900000');
   });
 });
 
@@ -2293,7 +2320,11 @@ describe('wallet balance checks before opening a new position', () => {
   it('uses wallet balances to trigger the required swap for a rebalanced position', async () => {
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
     const monitor = makeMonitor([pos], pool);
     (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);

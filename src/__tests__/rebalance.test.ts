@@ -15,6 +15,7 @@ import { TransactionUtil } from '@cetusprotocol/cetus-sui-clmm-sdk';
 
 function makePoolInfo(overrides: Partial<{
   currentTickIndex: number;
+  currentSqrtPrice: string;
   tickSpacing: number;
   coinTypeA: string;
   coinTypeB: string;
@@ -22,7 +23,7 @@ function makePoolInfo(overrides: Partial<{
   return {
     poolAddress: '0xpool',
     currentTickIndex: overrides.currentTickIndex ?? 0,
-    currentSqrtPrice: '1000000000',
+    currentSqrtPrice: overrides.currentSqrtPrice ?? '1000000000',
     coinTypeA: overrides.coinTypeA ?? '0xcoinA',
     coinTypeB: overrides.coinTypeB ?? '0xcoinB',
     tickSpacing: overrides.tickSpacing ?? 1,
@@ -67,6 +68,8 @@ function makeSdkService(address = '0xwallet') {
     getSuiClient: jest.fn(),
   } as any;
 }
+
+const POST_SWAP_BALANCE = '500000';
 
 // ---------------------------------------------------------------------------
 // checkAndRebalance — returns null when position is in range
@@ -193,7 +196,11 @@ describe('checkAndRebalance – dry-run out-of-range, env tick range', () => {
   afterEach(() => { delete process.env.DRY_RUN; });
 
   it('returns success with the env-configured new tick range', async () => {
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616', // 2^64 => priceA = 1 tokenB per 1 tokenA
+      tickSpacing: 10,
+    });
     // Position is below current tick (out of range)
     const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '1000000' });
     const monitor = makeMonitor([pos], pool);
@@ -1777,10 +1784,10 @@ describe('checkAndRebalance – no positions, RANGE_WIDTH tick range', () => {
 });
 
 // ---------------------------------------------------------------------------
-// createInitialPosition — configured amounts capped by wallet balance
+// createInitialPosition — TOTAL_USD converted into fixed token amounts
 // ---------------------------------------------------------------------------
 
-describe('createInitialPosition – configured amounts capped by wallet balance', () => {
+describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
   afterEach(() => { delete process.env.DRY_RUN; });
 
   /**
@@ -1797,7 +1804,11 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
     process.env.DRY_RUN = 'false';
 
     // No existing positions → createInitialPosition is invoked.
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616', // 2^64 => priceA = 1 tokenB per 1 tokenA
+      tickSpacing: 10,
+    });
     const monitor = makeMonitor([], pool);
 
     const config = {
@@ -1805,7 +1816,7 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
       maxSlippage: 0.01,
       lowerTick: 400,
       upperTick: 600,
-      totalUsd: '10000000', // large enough that wallet value is below budget
+      totalUsd: '10000000',
     } as any;
 
     const mockTxStub = { setGasBudget: jest.fn() };
@@ -1852,9 +1863,9 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
     return { pool, monitor, config, sdkService, createAddLiquidityFixTokenPayload, mockSuiClient };
   }
 
-  it('uses wallet token A balance for initial position when wallet value is below TOTAL_USD', async () => {
+  it('uses TOTAL_USD-converted amounts with a safety buffer', async () => {
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload, mockSuiClient } =
-      makeInitialPositionScenario({ walletAmountA: '2000000', walletAmountB: '1000000' });
+      makeInitialPositionScenario({ walletAmountA: '9000000', walletAmountB: '9000000' });
 
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
@@ -1863,8 +1874,9 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
     expect(result!.success).toBe(true);
 
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // amount_a must equal the wallet balance when wallet value < TOTAL_USD.
-    expect(callArgs.amount_a).toBe('2000000');
+    // TOTAL_USD=10,000,000 => half=5,000,000 each; apply 98/100 multiplier => 4,900,000
+    expect(callArgs.amount_a).toBe('4900000');
+    expect(callArgs.amount_b).toBe('4900000');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
     expect(sdkService.getBalance).toHaveBeenCalledTimes(2);
@@ -1872,28 +1884,8 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
 
-  it('uses wallet token B balance for initial position when wallet value is below TOTAL_USD', async () => {
+  it('does not use arbitrary full wallet balances when TOTAL_USD is fixed', async () => {
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload, mockSuiClient } =
-      makeInitialPositionScenario({ walletAmountA: '1000000', walletAmountB: '1500000' });
-
-    const svc = new RebalanceService(sdkService, monitor, config);
-    const result = await svc.checkAndRebalance('0xpool');
-
-    expect(result).not.toBeNull();
-    expect(result!.success).toBe(true);
-
-    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // amount_b must equal the wallet balance when wallet value < TOTAL_USD.
-    expect(callArgs.amount_b).toBe('1500000');
-    expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
-    expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
-    expect(sdkService.getBalance).toHaveBeenCalledTimes(2);
-    // No swap was needed, so swap-specific Sui balance reads are still unused.
-    expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
-  });
-
-  it('uses full wallet balances when TOTAL_USD exceeds wallet value', async () => {
-    const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
       makeInitialPositionScenario({ walletAmountA: '9999999', walletAmountB: '9999999' });
 
     const svc = new RebalanceService(sdkService, monitor, config);
@@ -1903,9 +1895,25 @@ describe('createInitialPosition – configured amounts capped by wallet balance'
     expect(result!.success).toBe(true);
 
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    // Full wallet balances are passed through when wallet value is below TOTAL_USD.
-    expect(callArgs.amount_a).toBe('9999999');
-    expect(callArgs.amount_b).toBe('9999999');
+    expect(callArgs.amount_a).toBe('4900000');
+    expect(callArgs.amount_b).toBe('4900000');
+    expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
+    expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
+    expect(sdkService.getBalance).toHaveBeenCalledTimes(2);
+    // No swap was needed, so swap-specific Sui balance reads are still unused.
+    expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
+  });
+
+  it('fails when balances are still insufficient after swap attempt', async () => {
+    const { monitor, config, sdkService } =
+      makeInitialPositionScenario({ walletAmountA: '100000', walletAmountB: '100000' });
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(false);
+    expect(result!.error).toMatch(/Insufficient wallet balances to open initial position after swap attempt/);
   });
 });
 
@@ -2125,10 +2133,16 @@ describe('wallet balance checks before opening a new position', () => {
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
     };
 
+    let sdkBalanceCallCount = 0;
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
-      getBalance: jest.fn().mockImplementation((coinType: string) =>
-        Promise.resolve(coinType === '0xcoinA' ? '800000' : '0')),
+      getBalance: jest.fn().mockImplementation((coinType: string) => {
+        sdkBalanceCallCount++;
+        if (sdkBalanceCallCount <= 2) {
+          return Promise.resolve(coinType === '0xcoinA' ? '800000' : '0');
+        }
+        return Promise.resolve(coinType === '0xcoinA' ? POST_SWAP_BALANCE : POST_SWAP_BALANCE);
+      }),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
@@ -2157,7 +2171,11 @@ describe('wallet balance checks before opening a new position', () => {
   it('uses wallet balances to trigger the required swap for an initial position', async () => {
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616', // 2^64 => priceA = 1 tokenB per 1 tokenA
+      tickSpacing: 10,
+    });
     const monitor = makeMonitor([], pool);
     const config = {
       gasBudget: 50_000_000,
@@ -2205,16 +2223,22 @@ describe('wallet balance checks before opening a new position', () => {
         if (getBalanceCallCount <= 2) {
           return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '800000' : '0' });
         }
-        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '400000' : '350000' });
+        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? POST_SWAP_BALANCE : POST_SWAP_BALANCE });
       }),
       getCoins: jest.fn().mockResolvedValue({ data: [] }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
     };
 
+    let sdkBalanceCallCount = 0;
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
-      getBalance: jest.fn().mockImplementation((coinType: string) =>
-        Promise.resolve(coinType === '0xcoinA' ? '800000' : '0')),
+      getBalance: jest.fn().mockImplementation((coinType: string) => {
+        sdkBalanceCallCount++;
+        if (sdkBalanceCallCount <= 2) {
+          return Promise.resolve(coinType === '0xcoinA' ? '800000' : '0');
+        }
+        return Promise.resolve(coinType === '0xcoinA' ? POST_SWAP_BALANCE : POST_SWAP_BALANCE);
+      }),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
@@ -2236,14 +2260,18 @@ describe('wallet balance checks before opening a new position', () => {
     const addLiquidityArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0] as {
       amount_a: string; amount_b: string;
     };
-    expect(addLiquidityArgs.amount_a).toBe('400000');
-    expect(addLiquidityArgs.amount_b).toBe('350000');
+    expect(addLiquidityArgs.amount_a).toBe('490000');
+    expect(addLiquidityArgs.amount_b).toBe('490000');
   });
 
   it('falls back to the direct pool swap when the aggregator returns no route result', async () => {
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616', // 2^64 => priceA = 1 tokenB per 1 tokenA
+      tickSpacing: 10,
+    });
     const monitor = makeMonitor([], pool);
     const config = {
       gasBudget: 50_000_000,
@@ -2291,16 +2319,22 @@ describe('wallet balance checks before opening a new position', () => {
         if (getBalanceCallCount <= 2) {
           return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '800000' : '0' });
         }
-        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '400000' : '350000' });
+        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? POST_SWAP_BALANCE : POST_SWAP_BALANCE });
       }),
       getCoins: jest.fn().mockResolvedValue({ data: [] }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
     };
 
+    let sdkBalanceCallCount = 0;
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
-      getBalance: jest.fn().mockImplementation((coinType: string) =>
-        Promise.resolve(coinType === '0xcoinA' ? '800000' : '0')),
+      getBalance: jest.fn().mockImplementation((coinType: string) => {
+        sdkBalanceCallCount++;
+        if (sdkBalanceCallCount <= 2) {
+          return Promise.resolve(coinType === '0xcoinA' ? '800000' : '0');
+        }
+        return Promise.resolve(coinType === '0xcoinA' ? POST_SWAP_BALANCE : POST_SWAP_BALANCE);
+      }),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
@@ -2322,7 +2356,11 @@ describe('wallet balance checks before opening a new position', () => {
     // instead of falling through to the direct pool swap.
     process.env.DRY_RUN = 'false';
 
-    const pool = makePoolInfo({ currentTickIndex: 500, tickSpacing: 10 });
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616', // 2^64 => priceA = 1 tokenB per 1 tokenA
+      tickSpacing: 10,
+    });
     const monitor = makeMonitor([], pool);
     const config = {
       gasBudget: 50_000_000,
@@ -2384,16 +2422,22 @@ describe('wallet balance checks before opening a new position', () => {
         if (getBalanceCallCount <= 2) {
           return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '800000' : '0' });
         }
-        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '400000' : '350000' });
+        return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? POST_SWAP_BALANCE : POST_SWAP_BALANCE });
       }),
       getCoins: jest.fn().mockResolvedValue({ data: [] }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
     };
 
+    let sdkBalanceCallCount = 0;
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
-      getBalance: jest.fn().mockImplementation((coinType: string) =>
-        Promise.resolve(coinType === '0xcoinA' ? '800000' : '0')),
+      getBalance: jest.fn().mockImplementation((coinType: string) => {
+        sdkBalanceCallCount++;
+        if (sdkBalanceCallCount <= 2) {
+          return Promise.resolve(coinType === '0xcoinA' ? '800000' : '0');
+        }
+        return Promise.resolve(coinType === '0xcoinA' ? POST_SWAP_BALANCE : POST_SWAP_BALANCE);
+      }),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),

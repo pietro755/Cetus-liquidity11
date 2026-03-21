@@ -7,6 +7,9 @@ import { TransactionUtil, TickMath } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import type { AddLiquidityFixTokenParams, CoinAsset, PreSwapWithMultiPoolParams, SwapParams } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import type { BalanceChange } from '@mysten/sui/client';
 
+const INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR = 98n;
+const INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR = 100n;
+
 export interface RebalanceResult {
   success: boolean;
   transactionDigest?: string;
@@ -183,24 +186,46 @@ export class RebalanceService {
         };
       }
 
-      const balances = await this.getWalletTokenAmountsForPosition(poolInfo, 'initial position');
+      // Re-fetch pool state right before token conversion/deposit so TOTAL_USD is
+      // converted using the freshest available price.
+      const currentPoolInfo = await this.monitorService.getPoolInfo(poolInfo.poolAddress);
+      const required = this.computeInitialPositionTokenAmounts(currentPoolInfo);
+      const walletBalances = await this.readWalletTokenBalances(currentPoolInfo);
+      let balancesAfterSwap = walletBalances;
 
-      // Swap to correct token ratio if needed.
-      const adjusted = await this.swapTokensIfNeeded(
-        balances.amountA,
-        balances.amountB,
-        poolInfo,
-        lower,
-        upper,
-      );
+      // If wallet balances are insufficient for the computed amounts, try to
+      // rebalance via swap first, then validate again with refreshed balances.
+      const needsSwap =
+        BigInt(walletBalances.amountA) < BigInt(required.requiredAmountA) ||
+        BigInt(walletBalances.amountB) < BigInt(required.requiredAmountB);
+
+      if (needsSwap) {
+        await this.swapTokensIfNeeded(
+          walletBalances.amountA,
+          walletBalances.amountB,
+          currentPoolInfo,
+          lower,
+          upper,
+        );
+        balancesAfterSwap = await this.readWalletTokenBalances(currentPoolInfo);
+      }
+
+      if (
+        BigInt(balancesAfterSwap.amountA) < BigInt(required.amountA) ||
+        BigInt(balancesAfterSwap.amountB) < BigInt(required.amountB)
+      ) {
+        throw new Error(
+          'Insufficient wallet balances to open initial position after swap attempt',
+        );
+      }
 
       // Open the new position.
       const result = await this.openNewPosition(
-        poolInfo,
+        currentPoolInfo,
         lower,
         upper,
-        adjusted.amountA,
-        adjusted.amountB,
+        required.amountA,
+        required.amountB,
       );
 
       logger.info('Initial position created', {
@@ -1023,6 +1048,64 @@ export class RebalanceService {
     }
 
     return { amountA, amountB };
+  }
+
+  private async readWalletTokenBalances(poolInfo: PoolInfo): Promise<{ amountA: string; amountB: string }> {
+    const [walletBalanceA, walletBalanceB] = await Promise.all([
+      this.sdkService.getBalance(poolInfo.coinTypeA),
+      this.sdkService.getBalance(poolInfo.coinTypeB),
+    ]);
+    return { amountA: walletBalanceA, amountB: walletBalanceB };
+  }
+
+  private computeInitialPositionTokenAmounts(
+    poolInfo: PoolInfo,
+  ): {
+    requiredAmountA: string;
+    requiredAmountB: string;
+    amountA: string;
+    amountB: string;
+  } {
+    const totalUsd = BigInt(this.config.totalUsd);
+    // TOTAL_USD is configured in tokenB base units (e.g. USDC smallest unit),
+    // so halfUsd is the tokenB-side budget for each side of the position.
+    const halfUsd = totalUsd / 2n;
+    const sqrtP = BigInt(poolInfo.currentSqrtPrice);
+    const two128 = 2n ** 128n;
+    const priceANumerator = sqrtP * sqrtP;
+    const priceADenominator = two128;
+
+    if (priceANumerator === 0n) {
+      throw new Error('Cannot compute token amounts for initial position: pool price is zero');
+    }
+
+    // priceA = amount of tokenB per 1 tokenA = sqrtPrice^2 / 2^128
+    // amountA = halfUsd / priceA = halfUsd * 2^128 / sqrtPrice^2
+    const requiredAmountA = (halfUsd * priceADenominator / priceANumerator).toString();
+    const requiredAmountB = halfUsd.toString();
+
+    const amountA = (
+      BigInt(requiredAmountA) * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
+      INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR
+    ).toString();
+    const amountB = (
+      BigInt(requiredAmountB) * INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR /
+      INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR
+    ).toString();
+    const priceAScaled = (priceANumerator * 1_000_000n) / priceADenominator;
+
+    logger.info('Initial position TOTAL_USD conversion', {
+      totalUsd: this.config.totalUsd,
+      priceA: `${priceANumerator.toString()}/${priceADenominator.toString()}`,
+      priceAApproxMicro: priceAScaled.toString(),
+      priceB: '1',
+      requiredAmountA,
+      requiredAmountB,
+      amountA,
+      amountB,
+    });
+
+    return { requiredAmountA, requiredAmountB, amountA, amountB };
   }
 
   // ---------------------------------------------------------------------------

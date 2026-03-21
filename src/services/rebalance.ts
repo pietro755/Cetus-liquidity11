@@ -203,15 +203,6 @@ export class RebalanceService {
         'initial position',
       );
 
-      if (
-        BigInt(balancesAfterEnsure.amountA) < BigInt(required.amountA) ||
-        BigInt(balancesAfterEnsure.amountB) < BigInt(required.amountB)
-      ) {
-        throw new Error(
-          'Insufficient wallet balances to open initial position after swap attempt',
-        );
-      }
-
       // Open the new position.
       const result = await this.openNewPosition(
         currentPoolInfo,
@@ -516,11 +507,19 @@ export class RebalanceService {
       }
     } else if (swapAmount === 0n) {
       // In-range position needs both tokens.
-      if (bigA > 0n && bigB > 0n) {
+      if (bigA > 0n && bigB > 0n && this.hasSufficientBalance(bigA, bigB, requiredAmountA, requiredAmountB)) {
         // Both tokens available — no swap needed; the fix_amount_a bottleneck
         // logic in openNewPosition will handle the ratio correctly.
         logger.info('Both tokens available — no swap needed');
         return { amountA, amountB, didSwap: false };
+      }
+      if (bigA > 0n && bigB > 0n) {
+        logger.warn('[WARN] Insufficient balance, attempting swap', {
+          currentAmountA: amountA,
+          currentAmountB: amountB,
+          requiredAmountA: requiredAmountA.toString(),
+          requiredAmountB: requiredAmountB.toString(),
+        });
       }
       // One token is zero — compute the CLMM-optimal swap amount so the
       // resulting token ratio exactly matches what the target tick range
@@ -774,9 +773,24 @@ export class RebalanceService {
     initialBalances?: { amountA: string; amountB: string },
   ): Promise<{ amountA: string; amountB: string }> {
     const walletBalances = initialBalances ?? await this.readWalletTokenBalances(poolInfo);
-    const hasInsufficientBalance =
-      BigInt(walletBalances.amountA) < BigInt(amounts.requiredAmountA) ||
-      BigInt(walletBalances.amountB) < BigInt(amounts.requiredAmountB);
+    const requiredAmountA = BigInt(amounts.requiredAmountA);
+    const requiredAmountB = BigInt(amounts.requiredAmountB);
+    const walletAmountA = BigInt(walletBalances.amountA);
+    const walletAmountB = BigInt(walletBalances.amountB);
+
+    logger.info(`[INFO] Required: A=${requiredAmountA.toString()} B=${requiredAmountB.toString()}`);
+    logger.info(`[INFO] Wallet: A=${walletAmountA.toString()} B=${walletAmountB.toString()}`);
+
+    const hasInsufficientBalance = !this.hasSufficientBalance(
+      walletAmountA,
+      walletAmountB,
+      requiredAmountA,
+      requiredAmountB,
+    );
+
+    if (hasInsufficientBalance) {
+      logger.warn('[WARN] Insufficient balance, attempting swap', { positionContext });
+    }
 
     const swapResult = await this.swapTokensIfNeeded(
       walletBalances.amountA,
@@ -796,6 +810,55 @@ export class RebalanceService {
       });
     }
 
+    const postSwapBalances = swapResult.didSwap
+      ? await this.readWalletTokenBalances(poolInfo)
+      : walletBalances;
+
+    if (swapResult.didSwap) {
+      logger.info('Refreshed wallet balances after swap', {
+        positionContext,
+        refreshedAmountA: postSwapBalances.amountA,
+        refreshedAmountB: postSwapBalances.amountB,
+      });
+      logger.info(`[INFO] Wallet: A=${postSwapBalances.amountA} B=${postSwapBalances.amountB}`);
+    }
+
+    const finalWalletAmountA = BigInt(postSwapBalances.amountA);
+    const finalWalletAmountB = BigInt(postSwapBalances.amountB);
+    const hasSufficientAfterSwap = this.hasSufficientBalance(
+      finalWalletAmountA,
+      finalWalletAmountB,
+      requiredAmountA,
+      requiredAmountB,
+    );
+
+    if (!hasSufficientAfterSwap && positionContext === 'initial position') {
+      const precision = 1_000_000_000_000n;
+      const scaleA = requiredAmountA === 0n ? precision : (finalWalletAmountA * precision) / requiredAmountA;
+      const scaleB = requiredAmountB === 0n ? precision : (finalWalletAmountB * precision) / requiredAmountB;
+      const scale = scaleA < scaleB ? scaleA : scaleB;
+      const scaledAmountA = (requiredAmountA * scale) / precision;
+      const scaledAmountB = (requiredAmountB * scale) / precision;
+
+      logger.warn('[WARN] Scaling down position size to fit wallet balance', {
+        positionContext,
+        scale: scale.toString(),
+      });
+      logger.warn('[WARN] Scaling down position due to insufficient balance');
+
+      const finalAmountA = this.getMinimumOfTwoAmounts(finalWalletAmountA.toString(), scaledAmountA.toString());
+      const finalAmountB = this.getMinimumOfTwoAmounts(finalWalletAmountB.toString(), scaledAmountB.toString());
+
+      if (BigInt(finalAmountA) === 0n && BigInt(finalAmountB) === 0n) {
+        throw new Error(`Insufficient wallet balances to open ${positionContext}`);
+      }
+
+      return {
+        amountA: finalAmountA,
+        amountB: finalAmountB,
+      };
+    }
+
     if (!swapResult.didSwap) {
       return {
         amountA: this.capAmount(walletBalances.amountA, amounts.usableAmountA),
@@ -803,20 +866,14 @@ export class RebalanceService {
       };
     }
 
-    const refreshedBalances = await this.readWalletTokenBalances(poolInfo);
-    logger.info('Refreshed wallet balances after swap', {
-      positionContext,
-      refreshedAmountA: refreshedBalances.amountA,
-      refreshedAmountB: refreshedBalances.amountB,
-    });
     return {
       amountA: this.computeFinalAmount(
-        refreshedBalances.amountA,
+        postSwapBalances.amountA,
         swapResult.amountA,
         amounts.usableAmountA,
       ),
       amountB: this.computeFinalAmount(
-        refreshedBalances.amountB,
+        postSwapBalances.amountB,
         swapResult.amountB,
         amounts.usableAmountB,
       ),
@@ -855,7 +912,7 @@ export class RebalanceService {
     }
 
     if (BigInt(amountA) === 0n && BigInt(amountB) === 0n) {
-      throw new Error('Insufficient wallet balances to open new position after swap attempt');
+      throw new Error('Insufficient wallet balances to open new position');
     }
 
     // Only validate stored liquidity when it is explicitly provided (rebalance path).
@@ -1173,6 +1230,15 @@ export class RebalanceService {
     // full-node balance visibility lags behind local swap math.
     const reconciled = this.getMinimumOfTwoAmounts(refreshedAmount, adjustedAmount);
     return this.capAmount(reconciled, cap);
+  }
+
+  private hasSufficientBalance(
+    balanceA: bigint,
+    balanceB: bigint,
+    requiredA: bigint,
+    requiredB: bigint,
+  ): boolean {
+    return balanceA >= requiredA && balanceB >= requiredB;
   }
 
   private computeInitialPositionTokenAmounts(

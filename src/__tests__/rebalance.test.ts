@@ -1822,8 +1822,15 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     const mockTxStub = { setGasBudget: jest.fn() };
     const successEffect = { status: { status: 'success' } };
 
+    const createSwapTransactionPayload = jest.fn().mockReturnValue(mockTxStub);
     const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
     const mockSdk = {
+      RouterV2: {
+        getBestRouter: jest.fn().mockRejectedValue(new Error('aggregator unavailable')),
+      },
+      Swap: {
+        createSwapTransactionPayload,
+      },
       Position: {
         openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
         createAddLiquidityFixTokenPayload,
@@ -1832,22 +1839,20 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     };
 
     const mockSuiClient = {
-      signAndExecuteTransaction: jest.fn()
-        // call 1: openPosition (NFT)
-        .mockResolvedValueOnce({
-          effects: successEffect,
-          digest: '0xopen',
-          objectChanges: [{
-            type: 'created',
-            objectType: 'position',
-            objectId: '0xnewpos',
-            owner: { AddressOwner: '0xwallet' },
-          }],
-        })
-        // call 2: addLiquidity
-        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
-      // getBalance is only used inside swapTokensIfNeeded when a swap actually happens
-      getBalance: jest.fn(),
+      signAndExecuteTransaction: jest.fn().mockResolvedValue({
+        effects: successEffect,
+        digest: '0xtx',
+        balanceChanges: [],
+        objectChanges: [{
+          type: 'created',
+          objectType: 'position',
+          objectId: '0xnewpos',
+          owner: { AddressOwner: '0xwallet' },
+        }],
+      }),
+      // getBalance/getCoins are used in swapTokensIfNeeded when a swap happens.
+      getBalance: jest.fn().mockResolvedValue({ totalBalance: opts.walletAmountA }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
     };
 
@@ -1904,16 +1909,18 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
 
-  it('fails when balances are still insufficient after swap attempt', async () => {
-    const { monitor, config, sdkService } =
+  it('scales down when balances are still insufficient after swap attempt', async () => {
+    const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
       makeInitialPositionScenario({ walletAmountA: '100000', walletAmountB: '100000' });
 
     const svc = new RebalanceService(sdkService, monitor, config);
     const result = await svc.checkAndRebalance('0xpool');
 
     expect(result).not.toBeNull();
-    expect(result!.success).toBe(false);
-    expect(result!.error).toMatch(/Insufficient wallet balances to open initial position after swap attempt/);
+    expect(result!.success).toBe(true);
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    expect(callArgs.amount_a).toBe('100000');
+    expect(callArgs.amount_b).toBe('100000');
   });
 });
 
@@ -2507,6 +2514,6 @@ describe('wallet balance checks before opening a new position', () => {
 
     expect(result).not.toBeNull();
     expect(result!.success).toBe(false);
-    expect(result!.error).toMatch(/Insufficient wallet balances to open initial position/);
+    expect(result!.error).toMatch(/Insufficient wallet balances to open initial position|Insufficient wallet balances to open new position/);
   });
 });

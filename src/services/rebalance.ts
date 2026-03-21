@@ -190,6 +190,10 @@ export class RebalanceService {
       // converted using the freshest available price.
       const currentPoolInfo = await this.monitorService.getPoolInfo(poolInfo.poolAddress);
       const required = this.computeInitialPositionTokenAmounts(currentPoolInfo);
+      // When the TOTAL_USD budget is so small that integer arithmetic truncates
+      // the computed amounts to zero, treat them as uncapped (undefined) so
+      // capAmount falls back to the full wallet balance.  A zero cap would
+      // otherwise prevent any tokens from being deposited.
       const balancesAfterEnsure = await this.ensureBalances(
         currentPoolInfo,
         lower,
@@ -197,8 +201,8 @@ export class RebalanceService {
         {
           requiredAmountA: required.requiredAmountA,
           requiredAmountB: required.requiredAmountB,
-          usableAmountA: required.amountA,
-          usableAmountB: required.amountB,
+          usableAmountA: required.amountA !== '0' ? required.amountA : undefined,
+          usableAmountB: required.amountB !== '0' ? required.amountB : undefined,
         },
         'initial position',
       );

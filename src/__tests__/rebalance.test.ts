@@ -1922,6 +1922,76 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     expect(callArgs.amount_a).toBe('100000');
     expect(callArgs.amount_b).toBe('100000');
   });
+
+  it('falls back to wallet balances when TOTAL_USD is too small for integer arithmetic (halfUsd=0)', async () => {
+    // TOTAL_USD=1 → halfUsd = 1n/2n = 0n → computeInitialPositionTokenAmounts
+    // returns amountA="0", amountB="0".  Without the fix, capAmount("wallet","0")="0"
+    // causes openNewPosition to throw "Insufficient wallet balances to open new position".
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616', // 2^64 => priceA = 1 tokenB per 1 tokenA
+      tickSpacing: 10,
+    });
+    const monitor = makeMonitor([], pool);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '1',  // halfUsd = 0n — triggers the truncation bug
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      RouterV2: { getBestRouter: jest.fn().mockRejectedValue(new Error('aggregator unavailable')) },
+      Swap: { createSwapTransactionPayload: jest.fn().mockReturnValue(mockTxStub) },
+      Position: {
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn().mockResolvedValue({
+        effects: successEffect,
+        digest: '0xtx',
+        balanceChanges: [],
+        objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+      }),
+      getBalance: jest.fn().mockResolvedValue({ totalBalance: '0' }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      // Wallet has both tokens — amounts that match the real failing scenario.
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? '972427' : '2818067929')),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    // Position must be created successfully, not fail with "Insufficient wallet balances".
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    // Both wallet amounts should pass through to createAddLiquidityFixTokenPayload
+    // since no meaningful TOTAL_USD cap could be computed.
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    expect(BigInt(callArgs.amount_a)).toBeGreaterThan(0n);
+    expect(BigInt(callArgs.amount_b)).toBeGreaterThan(0n);
+  });
 });
 
 // ---------------------------------------------------------------------------

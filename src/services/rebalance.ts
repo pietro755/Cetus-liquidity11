@@ -631,7 +631,7 @@ export class RebalanceService {
     };
 
     try {
-      const { result } = await sdk.RouterV2.getBestRouter(
+      const { result } = await this.withSuppressedSdkRouterNoise(() => sdk.RouterV2.getBestRouter(
         fromCoin,
         toCoin,
         Number(swapAmount),   // SDK accepts number; precision loss is acceptable for routing
@@ -641,7 +641,7 @@ export class RebalanceService {
         '',                   // _senderAddress — deprecated in SDK; must be
                               // supplied to correctly position swapWithMultiPoolParams
         swapWithMultiPoolParams,
-      );
+      ));
 
       // Accept the result whether it came from the aggregator API (isTimeout:
       // false) or the SDK's V1/RPC fallback (isTimeout: true).  The SDK sets
@@ -653,13 +653,13 @@ export class RebalanceService {
         !result.isExceed &&
         result.splitPaths.length > 0
       ) {
-        swapTx = await TransactionUtil.buildAggregatorSwapTransaction(
+        swapTx = await this.withSuppressedSdkRouterNoise(() => TransactionUtil.buildAggregatorSwapTransaction(
           sdk,
           result,
           allCoinAsset,
           '',                          // no partner
           this.config.maxSlippage,
-        );
+        ));
         logger.info('Using aggregator route', {
           inputAmount: result.inputAmount,
           outputAmount: result.outputAmount,
@@ -1607,6 +1607,42 @@ export class RebalanceService {
     } catch (error) {
       logger.warn('Failed to preload router token metadata for aggregator swap', error);
     }
+  }
+
+  private async withSuppressedSdkRouterNoise<T>(action: () => Promise<T>): Promise<T> {
+    const originalError = console.error;
+    const originalLog = console.log;
+
+    console.error = ((...args: unknown[]) => {
+      if (this.isSuppressedSdkRouterError(args)) {
+        return;
+      }
+      originalError(...args);
+    }) as typeof console.error;
+
+    console.log = ((...args: unknown[]) => {
+      if (this.isSuppressedSdkRouterLog(args)) {
+        return;
+      }
+      originalLog(...args);
+    }) as typeof console.log;
+
+    try {
+      return await action();
+    } finally {
+      console.error = originalError;
+      console.log = originalLog;
+    }
+  }
+
+  private isSuppressedSdkRouterError(args: unknown[]): boolean {
+    const [firstArg] = args;
+    return firstArg instanceof TypeError &&
+      /Cannot read properties of undefined \(reading 'map'\)/.test(firstArg.message);
+  }
+
+  private isSuppressedSdkRouterLog(args: unknown[]): boolean {
+    return args[0] === 'json data. ';
   }
 
 }

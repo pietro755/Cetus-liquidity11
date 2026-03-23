@@ -900,17 +900,31 @@ export class RebalanceService {
     );
 
     if (!hasSufficientAfterSwap && positionContext === 'initial position') {
+      const targetAmountA = BigInt(amounts.usableAmountA ?? amounts.requiredAmountA);
+      const targetAmountB = BigInt(amounts.usableAmountB ?? amounts.requiredAmountB);
+
+      if (this.hasSufficientBalance(finalWalletAmountA, finalWalletAmountB, targetAmountA, targetAmountB)) {
+        const finalAmountA = this.capAmount(postSwapBalances.amountA, targetAmountA.toString());
+        const finalAmountB = this.capAmount(postSwapBalances.amountB, targetAmountB.toString());
+
+        logger.debug(`[DEBUG] Final amounts used: A=${finalAmountA} B=${finalAmountB}`);
+        return {
+          amountA: finalAmountA,
+          amountB: finalAmountB,
+        };
+      }
+
       const precision = 1_000_000_000_000n;
-      const scaleA = requiredAmountA === 0n ? precision : (finalWalletAmountA * precision) / requiredAmountA;
-      const scaleB = requiredAmountB === 0n ? precision : (finalWalletAmountB * precision) / requiredAmountB;
+      const scaleA = targetAmountA === 0n ? precision : (finalWalletAmountA * precision) / targetAmountA;
+      const scaleB = targetAmountB === 0n ? precision : (finalWalletAmountB * precision) / targetAmountB;
       const scale = scaleA < scaleB ? scaleA : scaleB;
 
       if (scale === 0n) {
         throw new Error(`No usable balance to open ${positionContext}`);
       }
 
-      const scaledAmountA = (requiredAmountA * scale) / precision;
-      const scaledAmountB = (requiredAmountB * scale) / precision;
+      const scaledAmountA = (targetAmountA * scale) / precision;
+      const scaledAmountB = (targetAmountB * scale) / precision;
 
       logger.warn('Scaling down position size to fit wallet balance', {
         positionContext,

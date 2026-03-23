@@ -42,6 +42,13 @@ interface RemoveLiquidityParams {
   rewarder_coin_types: string[];
 }
 
+class RetryAddLiquidityWithAdjustedAmountsError extends Error {
+  constructor(causeMessage: string) {
+    super(`Retrying add-liquidity with adjusted amounts due to InsufficientCoinBalance: ${causeMessage}`);
+    this.name = 'RetryAddLiquidityWithAdjustedAmountsError';
+  }
+}
+
 export class RebalanceService {
   private sdkService: CetusSDKService;
   private monitorService: PositionMonitorService;
@@ -1070,11 +1077,11 @@ export class RebalanceService {
       ? freshBalances.amountB
       : amountB;
 
-    let currentStep2AmountA = step2AmountA;
-    let currentStep2AmountB = step2AmountB;
-    let currentFixAmountA = this.determineFixAmountA(
-      BigInt(currentStep2AmountA || '0'),
-      BigInt(currentStep2AmountB || '0'),
+    let currentAmountA = step2AmountA;
+    let currentAmountB = step2AmountB;
+    let currentShouldFixAmountA = this.determineFixAmountA(
+      BigInt(currentAmountA || '0'),
+      BigInt(currentAmountB || '0'),
       poolInfo,
       tickLower,
       tickUpper,
@@ -1100,9 +1107,9 @@ export class RebalanceService {
     // See determineFixAmountA() for the exact CLMM comparison used.
     logger.info('Opening new position — step 2: deposit tokens', {
       positionId: newPositionId,
-      amountA: currentStep2AmountA,
-      amountB: currentStep2AmountB,
-      fix_amount_a: currentFixAmountA,
+      amountA: currentAmountA,
+      amountB: currentAmountB,
+      fix_amount_a: currentShouldFixAmountA,
     });
 
     let addDigest: string | undefined;
@@ -1114,9 +1121,9 @@ export class RebalanceService {
           pos_id: newPositionId,
           coinTypeA: poolInfo.coinTypeA,
           coinTypeB: poolInfo.coinTypeB,
-          amount_a: currentStep2AmountA,
-          amount_b: currentStep2AmountB,
-          fix_amount_a: currentFixAmountA,
+          amount_a: currentAmountA,
+          amount_b: currentAmountB,
+          fix_amount_a: currentShouldFixAmountA,
           slippage: this.config.maxSlippage,
           is_open: false,
           tick_lower: String(tickLower),
@@ -1162,17 +1169,19 @@ export class RebalanceService {
             tickLower,
             tickUpper,
             {
-              amountA: currentStep2AmountA,
-              amountB: currentStep2AmountB,
-              fixAmountA: currentFixAmountA,
+              amountA: currentAmountA,
+              amountB: currentAmountB,
+              shouldFixAmountA: currentShouldFixAmountA,
             },
           );
 
           if (adjustedParams) {
-            currentStep2AmountA = adjustedParams.amountA;
-            currentStep2AmountB = adjustedParams.amountB;
-            currentFixAmountA = adjustedParams.fixAmountA;
-            throw new Error(`Adjusted add-liquidity amounts after InsufficientCoinBalance: ${addLiquidityError instanceof Error ? addLiquidityError.message : String(addLiquidityError)}`);
+            currentAmountA = adjustedParams.amountA;
+            currentAmountB = adjustedParams.amountB;
+            currentShouldFixAmountA = adjustedParams.shouldFixAmountA;
+            throw new RetryAddLiquidityWithAdjustedAmountsError(
+              addLiquidityError instanceof Error ? addLiquidityError.message : String(addLiquidityError),
+            );
           }
 
           throw addLiquidityError;
@@ -1337,15 +1346,17 @@ export class RebalanceService {
   private applyAddLiquiditySafetyMargin(
     amountA: string,
     amountB: string,
-    fixAmountA: boolean,
+    shouldFixAmountA: boolean,
   ): { amountA: string; amountB: string } | null {
     let bigAmountA = BigInt(amountA || '0');
     let bigAmountB = BigInt(amountB || '0');
 
-    if (fixAmountA) {
+    if (shouldFixAmountA) {
       if (bigAmountA > 0n) {
         bigAmountA -= 1n;
       } else if (bigAmountB > 0n) {
+        // If the selected fixed token has already been depleted to zero, shrink the
+        // remaining token instead so the retry still backs off from the prior attempt.
         bigAmountB -= 1n;
       } else {
         return null;
@@ -1364,13 +1375,24 @@ export class RebalanceService {
     };
   }
 
+  private addLiquidityParamsUnchanged(
+    currentParams: { amountA: string; amountB: string; shouldFixAmountA: boolean },
+    nextParams: { amountA: string; amountB: string; shouldFixAmountA: boolean },
+  ): boolean {
+    return (
+      nextParams.amountA === currentParams.amountA &&
+      nextParams.amountB === currentParams.amountB &&
+      nextParams.shouldFixAmountA === currentParams.shouldFixAmountA
+    );
+  }
+
   private async adjustAddLiquidityRetryParams(
     error: unknown,
     poolInfo: PoolInfo,
     tickLower: number,
     tickUpper: number,
-    currentParams: { amountA: string; amountB: string; fixAmountA: boolean },
-  ): Promise<{ amountA: string; amountB: string; fixAmountA: boolean } | null> {
+    currentParams: { amountA: string; amountB: string; shouldFixAmountA: boolean },
+  ): Promise<{ amountA: string; amountB: string; shouldFixAmountA: boolean } | null> {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.includes('InsufficientCoinBalance')) {
       return null;
@@ -1379,7 +1401,7 @@ export class RebalanceService {
     const refreshedBalances = await this.readWalletTokenBalances(poolInfo);
     let nextAmountA = this.getMinimumOfTwoAmounts(currentParams.amountA, refreshedBalances.amountA);
     let nextAmountB = this.getMinimumOfTwoAmounts(currentParams.amountB, refreshedBalances.amountB);
-    let nextFixAmountA = this.determineFixAmountA(
+    let nextShouldFixAmountA = this.determineFixAmountA(
       BigInt(nextAmountA || '0'),
       BigInt(nextAmountB || '0'),
       poolInfo,
@@ -1387,15 +1409,15 @@ export class RebalanceService {
       tickUpper,
     );
 
-    if (
-      nextAmountA === currentParams.amountA &&
-      nextAmountB === currentParams.amountB &&
-      nextFixAmountA === currentParams.fixAmountA
-    ) {
+    if (this.addLiquidityParamsUnchanged(currentParams, {
+      amountA: nextAmountA,
+      amountB: nextAmountB,
+      shouldFixAmountA: nextShouldFixAmountA,
+    })) {
       const reducedAmounts = this.applyAddLiquiditySafetyMargin(
         nextAmountA,
         nextAmountB,
-        nextFixAmountA,
+        nextShouldFixAmountA,
       );
 
       if (!reducedAmounts) {
@@ -1404,7 +1426,7 @@ export class RebalanceService {
 
       nextAmountA = reducedAmounts.amountA;
       nextAmountB = reducedAmounts.amountB;
-      nextFixAmountA = this.determineFixAmountA(
+      nextShouldFixAmountA = this.determineFixAmountA(
         BigInt(nextAmountA || '0'),
         BigInt(nextAmountB || '0'),
         poolInfo,
@@ -1413,27 +1435,19 @@ export class RebalanceService {
       );
     }
 
-    if (
-      nextAmountA === currentParams.amountA &&
-      nextAmountB === currentParams.amountB &&
-      nextFixAmountA === currentParams.fixAmountA
-    ) {
-      return null;
-    }
-
     logger.warn('Add liquidity hit InsufficientCoinBalance, retrying with reduced amounts', {
       previousAmountA: currentParams.amountA,
       previousAmountB: currentParams.amountB,
       nextAmountA,
       nextAmountB,
-      previousFixAmountA: currentParams.fixAmountA,
-      nextFixAmountA,
+      previousFixAmountA: currentParams.shouldFixAmountA,
+      nextFixAmountA: nextShouldFixAmountA,
     });
 
     return {
       amountA: nextAmountA,
       amountB: nextAmountB,
-      fixAmountA: nextFixAmountA,
+      shouldFixAmountA: nextShouldFixAmountA,
     };
   }
 
@@ -1597,12 +1611,12 @@ export class RebalanceService {
         lastError = error instanceof Error ? error : new Error(msg);
 
         const isRetryable =
+          error instanceof RetryAddLiquidityWithAdjustedAmountsError ||
           msg.includes('is not available for consumption') ||
           (msg.includes('Version') && msg.includes('Digest')) ||
           msg.includes('current version:') ||
           (msg.includes('pending') && msg.includes('seconds old')) ||
-          (msg.includes('pending') && msg.includes('above threshold')) ||
-          msg.includes('Adjusted add-liquidity amounts after InsufficientCoinBalance:');
+          (msg.includes('pending') && msg.includes('above threshold'));
 
         if (!isRetryable) throw error;
 

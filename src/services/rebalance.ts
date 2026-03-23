@@ -10,6 +10,16 @@ import type { BalanceChange } from '@mysten/sui/client';
 const INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR = 98n;
 const INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR = 100n;
 const TWO_128 = 2n ** 128n;
+// Cetus SDK v5.4.0 may emit this benign parse error when the router API omits
+// split_paths but the SDK still succeeds via its internal fallback route.
+const SDK_ROUTER_PARSE_ERROR_PATTERN = /Cannot read properties of undefined \(reading ['"]map['"]\)/i;
+const SDK_ROUTER_DEBUG_LOG_PREFIX = 'json data. ';
+// Suppression must be process-wide because the SDK writes directly to the
+// process-wide console during async router calls.
+let sdkRouterNoiseSuppressionDepth = 0;
+let sdkRouterNoiseHooksInstalled = false;
+const sdkRouterNoiseOriginalError = console.error.bind(console);
+const sdkRouterNoiseOriginalLog = console.log.bind(console);
 
 export interface RebalanceResult {
   success: boolean;
@@ -1610,39 +1620,48 @@ export class RebalanceService {
   }
 
   private async withSuppressedSdkRouterNoise<T>(action: () => Promise<T>): Promise<T> {
-    const originalError = console.error;
-    const originalLog = console.log;
+    if (!sdkRouterNoiseHooksInstalled) {
+      console.error = ((...args: unknown[]) => {
+        if (this.isSuppressedSdkRouterError(args)) {
+          return;
+        }
+        sdkRouterNoiseOriginalError(...args);
+      }) as typeof console.error;
 
-    console.error = ((...args: unknown[]) => {
-      if (this.isSuppressedSdkRouterError(args)) {
-        return;
-      }
-      originalError(...args);
-    }) as typeof console.error;
+      console.log = ((...args: unknown[]) => {
+        if (this.isSuppressedSdkRouterLog(args)) {
+          return;
+        }
+        sdkRouterNoiseOriginalLog(...args);
+      }) as typeof console.log;
+      sdkRouterNoiseHooksInstalled = true;
+    }
 
-    console.log = ((...args: unknown[]) => {
-      if (this.isSuppressedSdkRouterLog(args)) {
-        return;
-      }
-      originalLog(...args);
-    }) as typeof console.log;
+    sdkRouterNoiseSuppressionDepth += 1;
 
     try {
       return await action();
     } finally {
-      console.error = originalError;
-      console.log = originalLog;
+      sdkRouterNoiseSuppressionDepth -= 1;
+      if (sdkRouterNoiseSuppressionDepth === 0) {
+        console.error = sdkRouterNoiseOriginalError;
+        console.log = sdkRouterNoiseOriginalLog;
+        sdkRouterNoiseHooksInstalled = false;
+      }
     }
   }
 
   private isSuppressedSdkRouterError(args: unknown[]): boolean {
+    if (sdkRouterNoiseSuppressionDepth <= 0) {
+      return false;
+    }
     const [firstArg] = args;
     return firstArg instanceof TypeError &&
-      /Cannot read properties of undefined \(reading 'map'\)/.test(firstArg.message);
+      SDK_ROUTER_PARSE_ERROR_PATTERN.test(firstArg.message);
   }
 
   private isSuppressedSdkRouterLog(args: unknown[]): boolean {
-    return args[0] === 'json data. ';
+    return sdkRouterNoiseSuppressionDepth > 0 && args[0] === SDK_ROUTER_DEBUG_LOG_PREFIX;
   }
 
 }

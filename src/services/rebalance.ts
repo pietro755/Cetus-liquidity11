@@ -10,6 +10,16 @@ import type { BalanceChange } from '@mysten/sui/client';
 const INITIAL_POSITION_SAFETY_BUFFER_NUMERATOR = 98n;
 const INITIAL_POSITION_SAFETY_BUFFER_DENOMINATOR = 100n;
 const TWO_128 = 2n ** 128n;
+// Cetus SDK v5.4.0 may emit this benign parse error when the router API omits
+// split_paths but the SDK still succeeds via its internal fallback route.
+const SDK_ROUTER_PARSE_ERROR_PATTERN = /Cannot read properties of undefined \(reading ['"]map['"]\)/i;
+const SDK_ROUTER_DEBUG_LOG_PREFIX = 'json data. ';
+// Suppression must be process-wide because the SDK writes directly to the
+// process-wide console during async router calls.
+let sdkRouterNoiseSuppressionDepth = 0;
+let sdkRouterNoiseHooksInstalled = false;
+const sdkRouterNoiseOriginalError = console.error.bind(console);
+const sdkRouterNoiseOriginalLog = console.log.bind(console);
 
 export interface RebalanceResult {
   success: boolean;
@@ -631,7 +641,7 @@ export class RebalanceService {
     };
 
     try {
-      const { result } = await sdk.RouterV2.getBestRouter(
+      const { result } = await this.withSuppressedSdkRouterNoise(() => sdk.RouterV2.getBestRouter(
         fromCoin,
         toCoin,
         Number(swapAmount),   // SDK accepts number; precision loss is acceptable for routing
@@ -641,7 +651,7 @@ export class RebalanceService {
         '',                   // _senderAddress — deprecated in SDK; must be
                               // supplied to correctly position swapWithMultiPoolParams
         swapWithMultiPoolParams,
-      );
+      ));
 
       // Accept the result whether it came from the aggregator API (isTimeout:
       // false) or the SDK's V1/RPC fallback (isTimeout: true).  The SDK sets
@@ -653,13 +663,13 @@ export class RebalanceService {
         !result.isExceed &&
         result.splitPaths.length > 0
       ) {
-        swapTx = await TransactionUtil.buildAggregatorSwapTransaction(
+        swapTx = await this.withSuppressedSdkRouterNoise(() => TransactionUtil.buildAggregatorSwapTransaction(
           sdk,
           result,
           allCoinAsset,
           '',                          // no partner
           this.config.maxSlippage,
-        );
+        ));
         logger.info('Using aggregator route', {
           inputAmount: result.inputAmount,
           outputAmount: result.outputAmount,
@@ -1607,6 +1617,51 @@ export class RebalanceService {
     } catch (error) {
       logger.warn('Failed to preload router token metadata for aggregator swap', error);
     }
+  }
+
+  private async withSuppressedSdkRouterNoise<T>(action: () => Promise<T>): Promise<T> {
+    if (!sdkRouterNoiseHooksInstalled) {
+      console.error = ((...args: unknown[]) => {
+        if (this.isSuppressedSdkRouterError(args)) {
+          return;
+        }
+        sdkRouterNoiseOriginalError(...args);
+      }) as typeof console.error;
+
+      console.log = ((...args: unknown[]) => {
+        if (this.isSuppressedSdkRouterLog(args)) {
+          return;
+        }
+        sdkRouterNoiseOriginalLog(...args);
+      }) as typeof console.log;
+      sdkRouterNoiseHooksInstalled = true;
+    }
+
+    sdkRouterNoiseSuppressionDepth += 1;
+
+    try {
+      return await action();
+    } finally {
+      sdkRouterNoiseSuppressionDepth -= 1;
+      if (sdkRouterNoiseSuppressionDepth === 0) {
+        console.error = sdkRouterNoiseOriginalError;
+        console.log = sdkRouterNoiseOriginalLog;
+        sdkRouterNoiseHooksInstalled = false;
+      }
+    }
+  }
+
+  private isSuppressedSdkRouterError(args: unknown[]): boolean {
+    if (sdkRouterNoiseSuppressionDepth <= 0) {
+      return false;
+    }
+    const [firstArg] = args;
+    return firstArg instanceof TypeError &&
+      SDK_ROUTER_PARSE_ERROR_PATTERN.test(firstArg.message);
+  }
+
+  private isSuppressedSdkRouterLog(args: unknown[]): boolean {
+    return sdkRouterNoiseSuppressionDepth > 0 && args[0] === SDK_ROUTER_DEBUG_LOG_PREFIX;
   }
 
 }

@@ -1968,6 +1968,108 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     expect(callArgs.amount_b).toBe('100000');
   });
 
+  it('retries add liquidity with a reduced fixed token amount when post-swap sizing still hits InsufficientCoinBalance', async () => {
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
+    const monitor = makeMonitor([], pool);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '10000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      RouterV2: { getBestRouter: jest.fn().mockRejectedValue(new Error('aggregator unavailable')) },
+      Swap: { createSwapTransactionPayload: jest.fn().mockReturnValue(mockTxStub) },
+      Position: {
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xswap',
+          balanceChanges: [],
+          objectChanges: [],
+        })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          balanceChanges: [],
+          objectChanges: [{
+            type: 'created',
+            objectType: 'position',
+            objectId: '0xnewpos',
+            owner: { AddressOwner: '0xwallet' },
+          }],
+        })
+        .mockResolvedValueOnce({
+          effects: { status: { status: 'failure', error: 'InsufficientCoinBalance in command 1' } },
+          digest: '0xadd-fail',
+        })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xadd-success',
+        }),
+      getBalance: jest.fn().mockResolvedValue({ totalBalance: '2378820' }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? '2378820' : '998359')),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(2);
+
+    const firstCallArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0] as {
+      amount_a: string;
+      amount_b: string;
+      fix_amount_a: boolean;
+    };
+    const secondCallArgs = createAddLiquidityFixTokenPayload.mock.calls[1][0] as {
+      amount_a: string;
+      amount_b: string;
+      fix_amount_a: boolean;
+    };
+
+    expect(firstCallArgs.amount_a).toBe('998359');
+    expect(firstCallArgs.amount_b).toBe('998359');
+
+    if (firstCallArgs.fix_amount_a) {
+      expect(secondCallArgs.amount_a).toBe((BigInt(firstCallArgs.amount_a) - 1n).toString());
+      expect(secondCallArgs.amount_b).toBe(firstCallArgs.amount_b);
+    } else {
+      expect(secondCallArgs.amount_a).toBe(firstCallArgs.amount_a);
+      expect(secondCallArgs.amount_b).toBe((BigInt(firstCallArgs.amount_b) - 1n).toString());
+    }
+  });
+
   it('returns a clear failure when TOTAL_USD is too small for initial-position integer arithmetic', async () => {
     // TOTAL_USD=1 → halfUsd = 0n → both required and buffered amounts are 0.
     // The bot should fail fast instead of silently opening with the full wallet.

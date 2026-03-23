@@ -1070,8 +1070,15 @@ export class RebalanceService {
       ? freshBalances.amountB
       : amountB;
 
-    const bigAmtA = BigInt(step2AmountA || '0');
-    const bigAmtB = BigInt(step2AmountB || '0');
+    let currentStep2AmountA = step2AmountA;
+    let currentStep2AmountB = step2AmountB;
+    let currentFixAmountA = this.determineFixAmountA(
+      BigInt(currentStep2AmountA || '0'),
+      BigInt(currentStep2AmountB || '0'),
+      poolInfo,
+      tickLower,
+      tickUpper,
+    );
 
     // Determine which token to fix for the add-liquidity call.
     //
@@ -1091,13 +1098,11 @@ export class RebalanceService {
     //                                                      the smaller delta_liquidity.
     //
     // See determineFixAmountA() for the exact CLMM comparison used.
-    const fix_amount_a = this.determineFixAmountA(bigAmtA, bigAmtB, poolInfo, tickLower, tickUpper);
-
     logger.info('Opening new position — step 2: deposit tokens', {
       positionId: newPositionId,
-      amountA: step2AmountA,
-      amountB: step2AmountB,
-      fix_amount_a,
+      amountA: currentStep2AmountA,
+      amountB: currentStep2AmountB,
+      fix_amount_a: currentFixAmountA,
     });
 
     let addDigest: string | undefined;
@@ -1109,9 +1114,9 @@ export class RebalanceService {
           pos_id: newPositionId,
           coinTypeA: poolInfo.coinTypeA,
           coinTypeB: poolInfo.coinTypeB,
-          amount_a: step2AmountA,
-          amount_b: step2AmountB,
-          fix_amount_a: fix_amount_a,
+          amount_a: currentStep2AmountA,
+          amount_b: currentStep2AmountB,
+          fix_amount_a: currentFixAmountA,
           slippage: this.config.maxSlippage,
           is_open: false,
           tick_lower: String(tickLower),
@@ -1122,33 +1127,56 @@ export class RebalanceService {
 
         logger.info('createAddLiquidityFixTokenPayload — parameters', { ...addLiquidityParams });
 
-        let addTx;
         try {
-          addTx = await sdk.Position.createAddLiquidityFixTokenPayload(addLiquidityParams);
-        } catch (sdkErr) {
-          logger.error('createAddLiquidityFixTokenPayload failed', {
-            error: sdkErr instanceof Error ? sdkErr.message : String(sdkErr),
-            params: addLiquidityParams,
+          let addTx;
+          try {
+            addTx = await sdk.Position.createAddLiquidityFixTokenPayload(addLiquidityParams);
+          } catch (sdkErr) {
+            logger.error('createAddLiquidityFixTokenPayload failed', {
+              error: sdkErr instanceof Error ? sdkErr.message : String(sdkErr),
+              params: addLiquidityParams,
+            });
+            throw sdkErr;
+          }
+          addTx.setGasBudget(this.config.gasBudget);
+
+          const addResult = await suiClient.signAndExecuteTransaction({
+            transaction: addTx,
+            signer: keypair,
+            options: { showEffects: true, showEvents: true },
           });
-          throw sdkErr;
+
+          if (addResult.effects?.status?.status !== 'success') {
+            throw new Error(`Add liquidity failed: ${addResult.effects?.status?.error || 'Unknown'}`);
+          }
+
+          addDigest = addResult.digest;
+          logger.info('New position opened with liquidity', {
+            positionId: newPositionId,
+            digest: addResult.digest,
+          });
+        } catch (addLiquidityError) {
+          const adjustedParams = await this.adjustAddLiquidityRetryParams(
+            addLiquidityError,
+            poolInfo,
+            tickLower,
+            tickUpper,
+            {
+              amountA: currentStep2AmountA,
+              amountB: currentStep2AmountB,
+              fixAmountA: currentFixAmountA,
+            },
+          );
+
+          if (adjustedParams) {
+            currentStep2AmountA = adjustedParams.amountA;
+            currentStep2AmountB = adjustedParams.amountB;
+            currentFixAmountA = adjustedParams.fixAmountA;
+            throw new Error(`Adjusted add-liquidity amounts after InsufficientCoinBalance: ${addLiquidityError instanceof Error ? addLiquidityError.message : String(addLiquidityError)}`);
+          }
+
+          throw addLiquidityError;
         }
-        addTx.setGasBudget(this.config.gasBudget);
-
-        const addResult = await suiClient.signAndExecuteTransaction({
-          transaction: addTx,
-          signer: keypair,
-          options: { showEffects: true, showEvents: true },
-        });
-
-        if (addResult.effects?.status?.status !== 'success') {
-          throw new Error(`Add liquidity failed: ${addResult.effects?.status?.error || 'Unknown'}`);
-        }
-
-        addDigest = addResult.digest;
-        logger.info('New position opened with liquidity', {
-          positionId: newPositionId,
-          digest: addResult.digest,
-        });
       },
       'add liquidity to new position',
       3,
@@ -1304,6 +1332,109 @@ export class RebalanceService {
     // full-node balance visibility lags behind local swap math.
     const reconciled = this.getMinimumOfTwoAmounts(refreshedAmount, adjustedAmount);
     return this.capAmount(reconciled, cap);
+  }
+
+  private applyAddLiquiditySafetyMargin(
+    amountA: string,
+    amountB: string,
+    fixAmountA: boolean,
+  ): { amountA: string; amountB: string } | null {
+    let bigAmountA = BigInt(amountA || '0');
+    let bigAmountB = BigInt(amountB || '0');
+
+    if (fixAmountA) {
+      if (bigAmountA > 0n) {
+        bigAmountA -= 1n;
+      } else if (bigAmountB > 0n) {
+        bigAmountB -= 1n;
+      } else {
+        return null;
+      }
+    } else if (bigAmountB > 0n) {
+      bigAmountB -= 1n;
+    } else if (bigAmountA > 0n) {
+      bigAmountA -= 1n;
+    } else {
+      return null;
+    }
+
+    return {
+      amountA: bigAmountA.toString(),
+      amountB: bigAmountB.toString(),
+    };
+  }
+
+  private async adjustAddLiquidityRetryParams(
+    error: unknown,
+    poolInfo: PoolInfo,
+    tickLower: number,
+    tickUpper: number,
+    currentParams: { amountA: string; amountB: string; fixAmountA: boolean },
+  ): Promise<{ amountA: string; amountB: string; fixAmountA: boolean } | null> {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes('InsufficientCoinBalance')) {
+      return null;
+    }
+
+    const refreshedBalances = await this.readWalletTokenBalances(poolInfo);
+    let nextAmountA = this.getMinimumOfTwoAmounts(currentParams.amountA, refreshedBalances.amountA);
+    let nextAmountB = this.getMinimumOfTwoAmounts(currentParams.amountB, refreshedBalances.amountB);
+    let nextFixAmountA = this.determineFixAmountA(
+      BigInt(nextAmountA || '0'),
+      BigInt(nextAmountB || '0'),
+      poolInfo,
+      tickLower,
+      tickUpper,
+    );
+
+    if (
+      nextAmountA === currentParams.amountA &&
+      nextAmountB === currentParams.amountB &&
+      nextFixAmountA === currentParams.fixAmountA
+    ) {
+      const reducedAmounts = this.applyAddLiquiditySafetyMargin(
+        nextAmountA,
+        nextAmountB,
+        nextFixAmountA,
+      );
+
+      if (!reducedAmounts) {
+        return null;
+      }
+
+      nextAmountA = reducedAmounts.amountA;
+      nextAmountB = reducedAmounts.amountB;
+      nextFixAmountA = this.determineFixAmountA(
+        BigInt(nextAmountA || '0'),
+        BigInt(nextAmountB || '0'),
+        poolInfo,
+        tickLower,
+        tickUpper,
+      );
+    }
+
+    if (
+      nextAmountA === currentParams.amountA &&
+      nextAmountB === currentParams.amountB &&
+      nextFixAmountA === currentParams.fixAmountA
+    ) {
+      return null;
+    }
+
+    logger.warn('Add liquidity hit InsufficientCoinBalance, retrying with reduced amounts', {
+      previousAmountA: currentParams.amountA,
+      previousAmountB: currentParams.amountB,
+      nextAmountA,
+      nextAmountB,
+      previousFixAmountA: currentParams.fixAmountA,
+      nextFixAmountA,
+    });
+
+    return {
+      amountA: nextAmountA,
+      amountB: nextAmountB,
+      fixAmountA: nextFixAmountA,
+    };
   }
 
   private hasSufficientBalance(
@@ -1470,7 +1601,8 @@ export class RebalanceService {
           (msg.includes('Version') && msg.includes('Digest')) ||
           msg.includes('current version:') ||
           (msg.includes('pending') && msg.includes('seconds old')) ||
-          (msg.includes('pending') && msg.includes('above threshold'));
+          (msg.includes('pending') && msg.includes('above threshold')) ||
+          msg.includes('Adjusted add-liquidity amounts after InsufficientCoinBalance:');
 
         if (!isRetryable) throw error;
 

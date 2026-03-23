@@ -900,12 +900,14 @@ export class RebalanceService {
     );
 
     if (!hasSufficientAfterSwap && positionContext === 'initial position') {
-      const targetAmountA = BigInt(amounts.usableAmountA ?? amounts.requiredAmountA);
-      const targetAmountB = BigInt(amounts.usableAmountB ?? amounts.requiredAmountB);
+      const targetAmountAString = amounts.usableAmountA ?? amounts.requiredAmountA;
+      const targetAmountBString = amounts.usableAmountB ?? amounts.requiredAmountB;
+      const targetAmountA = BigInt(targetAmountAString);
+      const targetAmountB = BigInt(targetAmountBString);
 
       if (this.hasSufficientBalance(finalWalletAmountA, finalWalletAmountB, targetAmountA, targetAmountB)) {
-        const finalAmountA = this.capAmount(postSwapBalances.amountA, targetAmountA.toString());
-        const finalAmountB = this.capAmount(postSwapBalances.amountB, targetAmountB.toString());
+        const finalAmountA = this.capAmount(postSwapBalances.amountA, targetAmountAString);
+        const finalAmountB = this.capAmount(postSwapBalances.amountB, targetAmountBString);
 
         logger.debug(`[DEBUG] Final amounts used: A=${finalAmountA} B=${finalAmountB}`);
         return {

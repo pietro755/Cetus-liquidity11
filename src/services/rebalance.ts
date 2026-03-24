@@ -659,13 +659,17 @@ export class RebalanceService {
       const bufBps = slipBps > minBps ? slipBps : minBps;
       estimatedInput = estimatedInput * (10000n + bufBps) / 10000n;
 
-      // Cap at the surplus of the source token so we don't eat into the
-      // amount needed for the position.
-      const surplus = a2b
-        ? (bigA > requiredAmountA ? bigA - requiredAmountA : 0n)
-        : (bigB > requiredAmountB ? bigB - requiredAmountB : 0n);
-      if (surplus > 0n && estimatedInput > surplus) {
-        estimatedInput = surplus;
+      // Cap at the total available source token balance so we never attempt
+      // to spend more than the wallet holds.  We intentionally allow the swap
+      // to use beyond the position's reserved share of the source token: after
+      // the swap, the receiving side fully covers the deficit and whatever
+      // source token remains is used for the position.  Capping at the narrow
+      // "surplus" (source balance minus position share) was the previous
+      // behaviour and caused the swap to deliver fewer tokens than the deficit
+      // required whenever the surplus was smaller than the estimated input.
+      const maxInput = a2b ? bigA : bigB;
+      if (estimatedInput > maxInput) {
+        estimatedInput = maxInput;
       }
 
       if (estimatedInput > 0n) {

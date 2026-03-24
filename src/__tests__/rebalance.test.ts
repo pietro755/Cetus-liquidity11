@@ -3158,6 +3158,133 @@ describe('wallet balance checks before opening a new position', () => {
     }
   });
 
+  it('uses full available balance (not just surplus) as the exactIn cap when surplus is too small to cover the deficit', async () => {
+    // Regression: the old code capped the aggregator exactIn input at
+    // (bigA - requiredAmountA), i.e. only the "surplus" A over the position's
+    // share.  When the surplus was smaller than the A needed to buy the B
+    // deficit the swap produced fewer tokens than required.
+    //
+    // Setup (sqrtPrice=2^64 → price=1, totalUsd=2_000_000):
+    //   requiredAmountA = 1_000_000, requiredAmountB = 1_000_000
+    //   walletA = 1_100_000  (surplus = 100_000)
+    //   walletB = 0          (deficitB = 1_000_000)
+    //   estimatedInput = 1_000_000 * 1.05 = 1_050_000
+    //
+    // Old behaviour: cap at surplus (100_000) → aggAmount = 100_000  (WRONG)
+    // New behaviour: cap at bigA  (1_100_000) → aggAmount = 1_050_000 (OK)
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616', // 2^64 → price = 1
+      tickSpacing: 10,
+    });
+    const monitor = makeMonitor([], pool);
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '2000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const v1FallbackResult = {
+      isExceed: false,
+      isTimeout: true,
+      inputAmount: 1050000,
+      outputAmount: 1000000,
+      fromCoin: '0xcoinA',
+      toCoin: '0xcoinB',
+      byAmountIn: true,
+      splitPaths: [{ percent: 100, inputAmount: 1050000, outputAmount: 1000000, pathIndex: 0, basePaths: [] }],
+    };
+
+    const mockSdk = {
+      RouterV2: {
+        getBestRouter: jest.fn().mockResolvedValue({ result: v1FallbackResult, version: 'v1' }),
+      },
+      Swap: { createSwapTransactionPayload: jest.fn().mockReturnValue(mockTxStub) },
+      Position: {
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload: jest.fn().mockResolvedValue(mockTxStub),
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    // walletA = 1_100_000 (surplus over requiredAmountA=1_000_000 is only 100_000)
+    // walletB = 0         (full deficit of 1_000_000 B)
+    let getBalanceCallCount = 0;
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xswap',
+          balanceChanges: [],
+        })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 2) {
+          return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '1100000' : '0' });
+        }
+        return Promise.resolve({ totalBalance: POST_SWAP_BALANCE });
+      }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    let sdkBalanceCallCount = 0;
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockImplementation((coinType: string) => {
+        sdkBalanceCallCount++;
+        if (sdkBalanceCallCount <= 2) {
+          return Promise.resolve(coinType === '0xcoinA' ? '1100000' : '0');
+        }
+        return Promise.resolve(POST_SWAP_BALANCE);
+      }),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const buildAggSpy = jest
+      .spyOn(TransactionUtil, 'buildAggregatorSwapTransaction')
+      .mockResolvedValue(mockTxStub as any);
+
+    try {
+      const svc = new RebalanceService(sdkService, monitor, config);
+      const result = await svc.checkAndRebalance('0xpool');
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(true);
+      expect(buildAggSpy).toHaveBeenCalledTimes(1);
+
+      const routerCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[0];
+      const aggByAmountIn = routerCallArgs[3];
+      const aggAmount    = routerCallArgs[2]; // Number(aggSwapAmount)
+
+      // Must still use exactIn.
+      expect(aggByAmountIn).toBe(true);
+
+      // The input must be large enough to cover the entire 1_000_000 B deficit.
+      // With the old surplus-cap code this would have been 100_000 (the small
+      // surplus), which is far too little.  With the new total-balance cap the
+      // value is 1_050_000 (deficit × 1.05 buffer), which is ≥ the deficit.
+      expect(aggAmount).toBeGreaterThanOrEqual(1_000_000);
+    } finally {
+      buildAggSpy.mockRestore();
+    }
+  });
+
   it('preloads router token metadata so the aggregator transaction can still be built', async () => {
     process.env.DRY_RUN = 'false';
 

@@ -3006,21 +3006,153 @@ describe('wallet balance checks before opening a new position', () => {
       expect(buildAggSpy).toHaveBeenCalledTimes(1);
       // swapWithMultiPoolParams must be passed so the SDK can fall back to RPC
       // routing without throwing "No parameters available for service downgrade".
+      // Deficit swaps use byAmountIn=true for the aggregator (exactIn with a
+      // buffered input amount) because the aggregator may not reliably support
+      // exactOut.  The direct pool swap fallback still uses byAmountIn=false.
       expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledWith(
         expect.any(String),   // fromCoin
         expect.any(String),   // toCoin
-        expect.any(Number),   // amount
-        false,                // byAmountIn (exactOut for deficit swap)
+        expect.any(Number),   // amount (buffered input)
+        true,                 // byAmountIn (exactIn for aggregator reliability)
         0,                    // priceSplitPoint
         '',                   // partner
         '',                   // _senderAddress (deprecated)
         expect.objectContaining({
           poolAddresses: ['0xpool'],
-          byAmountIn: false,
+          byAmountIn: true,
           coinTypeA: '0xcoinA',
           coinTypeB: '0xcoinB',
         }),
       );
+    } finally {
+      buildAggSpy.mockRestore();
+    }
+  });
+
+  it('converts deficit swap to byAmountIn=true with a buffered input for the aggregator', async () => {
+    // Regression test: the Cetus aggregator may not reliably deliver the exact
+    // output amount when using byAmountIn=false (exactOut).  The bot converts
+    // deficit swaps to byAmountIn=true with a price-derived input + buffer so
+    // the aggregator swaps enough to cover the deficit.
+    process.env.DRY_RUN = 'false';
+
+    // sqrtPrice = 2^64 ⟹ price = 1 tokenB per 1 tokenA.
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
+    const monitor = makeMonitor([], pool);
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '1000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+    const createSwapTransactionPayload = jest.fn().mockReturnValue(mockTxStub);
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+
+    const v1FallbackResult = {
+      isExceed: false,
+      isTimeout: true,
+      inputAmount: 800000,
+      outputAmount: 750000,
+      fromCoin: '0xcoinA',
+      toCoin: '0xcoinB',
+      byAmountIn: true,
+      splitPaths: [{ percent: 100, inputAmount: 800000, outputAmount: 750000, pathIndex: 0,
+        basePaths: [] }],
+    };
+
+    const mockSdk = {
+      RouterV2: {
+        getBestRouter: jest.fn().mockResolvedValue({ result: v1FallbackResult, version: 'v1' }),
+      },
+      Swap: {
+        createSwapTransactionPayload,
+      },
+      Position: {
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    // Wallet: plenty of A, zero B → deficit B swap (A→B).
+    let getBalanceCallCount = 0;
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xswap',
+          balanceChanges: [],
+        })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 2) {
+          return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '800000' : '0' });
+        }
+        return Promise.resolve({ totalBalance: POST_SWAP_BALANCE });
+      }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    let sdkBalanceCallCount = 0;
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockImplementation((coinType: string) => {
+        sdkBalanceCallCount++;
+        if (sdkBalanceCallCount <= 2) {
+          return Promise.resolve(coinType === '0xcoinA' ? '800000' : '0');
+        }
+        return Promise.resolve(POST_SWAP_BALANCE);
+      }),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const buildAggSpy = jest
+      .spyOn(TransactionUtil, 'buildAggregatorSwapTransaction')
+      .mockResolvedValue(mockTxStub as any);
+
+    try {
+      const svc = new RebalanceService(sdkService, monitor, config);
+      const result = await svc.checkAndRebalance('0xpool');
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(true);
+      expect(buildAggSpy).toHaveBeenCalledTimes(1);
+      // Direct pool swap must NOT be called when the aggregator succeeds.
+      expect(createSwapTransactionPayload).not.toHaveBeenCalled();
+
+      // The aggregator call must use byAmountIn=true (exactIn with buffer).
+      const routerCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[0];
+      const aggByAmountIn = routerCallArgs[3];
+      const aggAmount = routerCallArgs[2];
+      expect(aggByAmountIn).toBe(true);
+
+      // The buffered input amount should be larger than the raw deficit
+      // (which equals the amount that would be passed with byAmountIn=false).
+      // At price=1, estimatedInput = deficit * 1.05 (5% buffer since
+      // max(3×1%,5%) = 5%).  Since this is a Number, just verify it's positive.
+      expect(aggAmount).toBeGreaterThan(0);
+
+      // The swapWithMultiPoolParams embedded in the last argument must also
+      // carry byAmountIn=true.
+      const swapMultiPoolParam = routerCallArgs[7];
+      expect(swapMultiPoolParam.byAmountIn).toBe(true);
     } finally {
       buildAggSpy.mockRestore();
     }

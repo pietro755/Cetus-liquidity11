@@ -890,8 +890,15 @@ export class RebalanceService {
       logger.info(`Wallet: A=${postSwapBalances.amountA} B=${postSwapBalances.amountB}`);
     }
 
-    const finalWalletAmountA = BigInt(postSwapBalances.amountA);
-    const finalWalletAmountB = BigInt(postSwapBalances.amountB);
+    const effectivePostSwapAmountA = swapResult.didSwap
+      ? swapResult.amountA
+      : postSwapBalances.amountA;
+    const effectivePostSwapAmountB = swapResult.didSwap
+      ? swapResult.amountB
+      : postSwapBalances.amountB;
+
+    const finalWalletAmountA = BigInt(effectivePostSwapAmountA);
+    const finalWalletAmountB = BigInt(effectivePostSwapAmountB);
     const hasSufficientAfterSwap = this.hasSufficientBalance(
       finalWalletAmountA,
       finalWalletAmountB,
@@ -951,12 +958,10 @@ export class RebalanceService {
 
     return {
       amountA: this.computeFinalAmount(
-        postSwapBalances.amountA,
         swapResult.amountA,
         amounts.usableAmountA,
       ),
       amountB: this.computeFinalAmount(
-        postSwapBalances.amountB,
         swapResult.amountB,
         amounts.usableAmountB,
       ),
@@ -1348,15 +1353,14 @@ export class RebalanceService {
   }
 
   private computeFinalAmount(
-    refreshedAmount: string,
     adjustedAmount: string,
     cap?: string,
   ): string {
-    // We reconcile SDK-derived swap deltas with an explicit post-confirmation
-    // wallet read and keep the smaller amount to avoid over-spending when
-    // full-node balance visibility lags behind local swap math.
-    const reconciled = this.getMinimumOfTwoAmounts(refreshedAmount, adjustedAmount);
-    return this.capAmount(reconciled, cap);
+    // Trust the swap-adjusted amount derived from the confirmed transaction
+    // effects. The follow-up wallet refresh is useful for logging, but it can
+    // lag behind the transaction and should not shrink or expand the amount we
+    // size for the next add-liquidity step.
+    return this.capAmount(adjustedAmount, cap);
   }
 
   private applyAddLiquiditySafetyMargin(

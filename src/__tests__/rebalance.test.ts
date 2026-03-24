@@ -2063,6 +2063,103 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     expect(callArgs.amount_b).toBe('4900000');
   });
 
+  it('prefers swap-adjusted balances when the immediate post-swap wallet refresh lags for token B', async () => {
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
+    const monitor = makeMonitor([], pool);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '10000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+    const createSwapTransactionPayload = jest.fn().mockReturnValue(mockTxStub);
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      RouterV2: { getBestRouter: jest.fn().mockRejectedValue(new Error('aggregator unavailable')) },
+      Swap: { createSwapTransactionPayload },
+      Position: {
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xswap',
+          balanceChanges: [
+            { owner: { AddressOwner: '0xwallet' }, coinType: '0xcoinA', amount: '-200000' },
+            { owner: { AddressOwner: '0xwallet' }, coinType: '0xcoinB', amount: '200000' },
+          ],
+          objectChanges: [],
+        })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          balanceChanges: [],
+          objectChanges: [{
+            type: 'created',
+            objectType: 'position',
+            objectId: '0xnewpos',
+            owner: { AddressOwner: '0xwallet' },
+          }],
+        })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xadd-success',
+        }),
+      getBalance: jest.fn().mockResolvedValue({ totalBalance: '0' }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    const balanceReads = {
+      // First read: pre-swap wallet. Second read: immediate post-swap refresh that is still stale.
+      // Third read: step-2 balance check after the position NFT is created sees the updated wallet.
+      '0xcoinA': ['9000000', '8800000', '8800000'],
+      '0xcoinB': ['4800000', '4850000', '5000000'],
+    } as Record<string, string[]>;
+    const balanceIndices = new Map<string, number>();
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockImplementation((coinType: string) => {
+        const values = balanceReads[coinType];
+        const index = balanceIndices.get(coinType) ?? 0;
+        const value = values[Math.min(index, values.length - 1)];
+        balanceIndices.set(coinType, index + 1);
+        return Promise.resolve(value);
+      }),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    expect(createSwapTransactionPayload).toHaveBeenCalledTimes(1);
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(1);
+
+    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    expect(callArgs.amount_a).toBe('4900000');
+    expect(callArgs.amount_b).toBe('4900000');
+  });
+
   it('retries add liquidity with a reduced fixed token amount when post-swap sizing still hits InsufficientCoinBalance', async () => {
     process.env.DRY_RUN = 'false';
 

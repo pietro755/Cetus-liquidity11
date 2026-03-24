@@ -958,12 +958,10 @@ export class RebalanceService {
 
     return {
       amountA: this.computeFinalAmount(
-        postSwapBalances.amountA,
         swapResult.amountA,
         amounts.usableAmountA,
       ),
       amountB: this.computeFinalAmount(
-        postSwapBalances.amountB,
         swapResult.amountB,
         amounts.usableAmountB,
       ),
@@ -1355,7 +1353,6 @@ export class RebalanceService {
   }
 
   private computeFinalAmount(
-    _refreshedAmount: string,
     adjustedAmount: string,
     cap?: string,
   ): string {

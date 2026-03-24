@@ -631,6 +631,53 @@ export class RebalanceService {
 
     await this.ensureRouterTokenMetadata(sdk, [fromCoin, toCoin]);
 
+    // For the aggregator path: convert deficit swaps from exactOut to exactIn.
+    // The Cetus aggregator may not reliably deliver the exact output amount when
+    // using byAmountIn=false. By providing a buffered input amount with
+    // byAmountIn=true, we ensure the swap produces enough to cover the deficit.
+    let aggByAmountIn = byAmountIn;
+    let aggSwapAmount = swapAmount;
+
+    if (isDeficitSwap && !byAmountIn) {
+      const sqrtPBig = BigInt(poolInfo.currentSqrtPrice);
+      const TWO_128_AGG = 2n ** 128n;
+      const pX128 = sqrtPBig * sqrtPBig;
+
+      let estimatedInput: bigint;
+      if (a2b) {
+        // A→B: input A for desired B output
+        estimatedInput = pX128 > 0n ? swapAmount * TWO_128_AGG / pX128 : swapAmount;
+      } else {
+        // B→A: input B for desired A output
+        estimatedInput = pX128 > 0n ? swapAmount * pX128 / TWO_128_AGG : swapAmount;
+      }
+
+      // Add buffer to cover price impact, fees, and execution slippage.
+      // Use 3× maxSlippage or a 5 % floor, whichever is larger.
+      const slipBps = BigInt(Math.ceil(this.config.maxSlippage * 3 * 10000));
+      const minBps = 500n; // 5 %
+      const bufBps = slipBps > minBps ? slipBps : minBps;
+      estimatedInput = estimatedInput * (10000n + bufBps) / 10000n;
+
+      // Cap at the surplus of the source token so we don't eat into the
+      // amount needed for the position.
+      const surplus = a2b
+        ? (bigA > requiredAmountA ? bigA - requiredAmountA : 0n)
+        : (bigB > requiredAmountB ? bigB - requiredAmountB : 0n);
+      if (surplus > 0n && estimatedInput > surplus) {
+        estimatedInput = surplus;
+      }
+
+      if (estimatedInput > 0n) {
+        aggByAmountIn = true;
+        aggSwapAmount = estimatedInput;
+        logger.info('Deficit swap: using exactIn for aggregator reliability', {
+          deficitAmount: swapAmount.toString(),
+          aggInputAmount: aggSwapAmount.toString(),
+        });
+      }
+    }
+
     // Try the Cetus aggregator first for optimal routing.
     let swapTx;
 
@@ -641,8 +688,8 @@ export class RebalanceService {
     const swapWithMultiPoolParams: PreSwapWithMultiPoolParams = {
       poolAddresses: [poolInfo.poolAddress],
       a2b,
-      byAmountIn,
-      amount: swapAmount.toString(),
+      byAmountIn: aggByAmountIn,
+      amount: aggSwapAmount.toString(),
       coinTypeA: poolInfo.coinTypeA,
       coinTypeB: poolInfo.coinTypeB,
     };
@@ -651,12 +698,12 @@ export class RebalanceService {
       const { result } = await this.withSuppressedSdkRouterNoise(() => sdk.RouterV2.getBestRouter(
         fromCoin,
         toCoin,
-        Number(swapAmount),   // SDK accepts number; precision loss is acceptable for routing
-        byAmountIn,           // byAmountIn
-        0,                    // no split
-        '',                   // no partner
-        '',                   // _senderAddress — deprecated in SDK; must be
-                              // supplied to correctly position swapWithMultiPoolParams
+        Number(aggSwapAmount),   // SDK accepts number; precision loss is acceptable for routing
+        aggByAmountIn,           // byAmountIn — true for deficit swaps (exactIn with buffer)
+        0,                       // no split
+        '',                      // no partner
+        '',                      // _senderAddress — deprecated in SDK; must be
+                                 // supplied to correctly position swapWithMultiPoolParams
         swapWithMultiPoolParams,
       ));
 

@@ -2890,7 +2890,11 @@ describe('wallet balance checks before opening a new position', () => {
 
     expect(result).not.toBeNull();
     expect(result!.success).toBe(true);
-    expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledTimes(1);
+    // getBestRouter is called twice for deficit swaps: once for the aggregator
+    // quote (to compute the buffer) and once for the actual swap.  Both calls
+    // return null here, so the aggregator path is skipped for both and the
+    // direct pool swap is used as fallback.
+    expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledTimes(2);
     expect(createSwapTransactionPayload).toHaveBeenCalledTimes(1);
   });
 
@@ -3000,7 +3004,9 @@ describe('wallet balance checks before opening a new position', () => {
 
       expect(result).not.toBeNull();
       expect(result!.success).toBe(true);
-      expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledTimes(1);
+      // getBestRouter is called twice for deficit swaps: once for the aggregator
+      // quote (to compute the buffer) and once for the actual swap.
+      expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledTimes(2);
       // Aggregator path must be used — direct pool swap must NOT be called.
       expect(createSwapTransactionPayload).not.toHaveBeenCalled();
       expect(buildAggSpy).toHaveBeenCalledTimes(1);
@@ -3137,8 +3143,12 @@ describe('wallet balance checks before opening a new position', () => {
       // Direct pool swap must NOT be called when the aggregator succeeds.
       expect(createSwapTransactionPayload).not.toHaveBeenCalled();
 
-      // The aggregator call must use byAmountIn=true (exactIn with buffer).
-      const routerCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[0];
+      // getBestRouter is called twice: call[0] is the aggregator quote (to
+      // compute the buffer); call[1] is the actual aggregator swap.
+      expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledTimes(2);
+
+      // The actual swap call (index 1) must use byAmountIn=true (exactIn with buffer).
+      const routerCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[1];
       const aggByAmountIn = routerCallArgs[3];
       const aggAmount = routerCallArgs[2];
       expect(aggByAmountIn).toBe(true);
@@ -3268,7 +3278,11 @@ describe('wallet balance checks before opening a new position', () => {
       expect(result!.success).toBe(true);
       expect(buildAggSpy).toHaveBeenCalledTimes(1);
 
-      const routerCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[0];
+      // getBestRouter is called twice: call[0] is the aggregator quote (to
+      // compute the buffer); call[1] is the actual aggregator swap.
+      expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledTimes(2);
+
+      const routerCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[1];
       const aggByAmountIn = routerCallArgs[3];
       const aggAmount    = routerCallArgs[2]; // Number(aggSwapAmount)
 
@@ -3285,19 +3299,25 @@ describe('wallet balance checks before opening a new position', () => {
     }
   });
 
-  it('uses quote-driven price impact in deficit-swap buffer when preSwapWithMultiPool succeeds', async () => {
-    // When sdk.Swap.preSwapWithMultiPool returns a quote whose estimatedAmountOut
-    // is less than the deficit (due to fees / price impact), the bot must scale
-    // up the aggregator input amount to account for both the slippage tolerance
-    // and the measured price impact.
+  it('uses aggregator-quote-driven price impact in deficit-swap buffer', async () => {
+    // When the aggregator (getBestRouter) returns a quote whose outputAmount is
+    // less than the deficit (due to routing fees / price impact), the bot must
+    // scale up the input amount to account for both the slippage tolerance and
+    // the measured price impact.
+    //
+    // The quote is now obtained via getBestRouter (first call) rather than
+    // preSwapWithMultiPool, so the buffer reflects the aggregator's actual
+    // routing path instead of a direct-pool estimate that may differ.
     //
     // Setup (sqrtPrice=2^64 → price=1, totalUsd=2_000_000):
     //   requiredAmountA = 1_000_000, requiredAmountB = 1_000_000
     //   walletA = 1_100_000, walletB = 0  → deficitB = 1_000_000
     //   Initial spot estimate: estimatedInput = 1_000_000 (at price=1)
-    //   Quote returns estimatedAmountOut = 950_000  → priceImpact = 5%
-    //   maxSlippage = 1%
-    //   Buffer = 1% + 5% = 6%  → bufferedInput = 1_000_000 * 1.06 = 1_060_000
+    //   Quote (call 1) returns outputAmount = 950_000  → priceImpact = 5.26%
+    //     priceImpactBps = (1_000_000 − 950_000) × 10_000 / 950_000 ≈ 526 bps
+    //   maxSlippage = 1% (slipBps = 100)
+    //   bufBps = 100 + 526 = 626  → bufferedInput = 1_000_000 × 1.0626 ≈ 1_062_600
+    //   Actual swap uses bufferedInput (call 2).
     process.env.DRY_RUN = 'false';
 
     const pool = makePoolInfo({
@@ -3317,38 +3337,39 @@ describe('wallet balance checks before opening a new position', () => {
     const mockTxStub = { setGasBudget: jest.fn() };
     const successEffect = { status: { status: 'success' } };
 
+    // First call: aggregator quote — returns 950_000 output for 1_000_000 input
+    // (simulates aggregator routing at a slightly worse rate than spot price).
+    const quoteResult = {
+      isExceed: false,
+      isTimeout: false,
+      inputAmount: 1000000,
+      outputAmount: 950000,
+      fromCoin: '0xcoinA',
+      toCoin: '0xcoinB',
+      byAmountIn: true,
+      splitPaths: [],
+    };
+
+    // Second call: actual aggregator swap — has proper splitPaths for execution.
     const aggregatorResult = {
       isExceed: false,
       isTimeout: false,
-      inputAmount: 1060000,
+      inputAmount: 1062600,
       outputAmount: 1000000,
       fromCoin: '0xcoinA',
       toCoin: '0xcoinB',
       byAmountIn: true,
-      splitPaths: [{ percent: 100, inputAmount: 1060000, outputAmount: 1000000, pathIndex: 0, basePaths: [] }],
-    };
-
-    // Pre-swap quote: estimatedAmountOut = 950_000 (5% below the 1_000_000 deficit)
-    const preSwapQuote = {
-      poolAddress: '0xpool',
-      estimatedAmountIn: '1000000',
-      estimatedAmountOut: '950000',
-      estimatedEndSqrtPrice: '18000000000000000000',
-      estimatedStartSqrtPrice: '18446744073709551616',
-      estimatedFeeAmount: '3000',
-      isExceed: false,
-      amount: '1000000',
-      aToB: true,
-      byAmountIn: true,
+      splitPaths: [{ percent: 100, inputAmount: 1062600, outputAmount: 1000000, pathIndex: 0, basePaths: [] }],
     };
 
     const mockSdk = {
       RouterV2: {
-        getBestRouter: jest.fn().mockResolvedValue({ result: aggregatorResult, version: 'v2' }),
+        getBestRouter: jest.fn()
+          .mockResolvedValueOnce({ result: quoteResult, version: 'v2' })   // quote
+          .mockResolvedValueOnce({ result: aggregatorResult, version: 'v2' }), // actual swap
       },
       Swap: {
         createSwapTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
-        preSwapWithMultiPool: jest.fn().mockResolvedValue(preSwapQuote),
       },
       Position: {
         openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
@@ -3408,31 +3429,33 @@ describe('wallet balance checks before opening a new position', () => {
       expect(result).not.toBeNull();
       expect(result!.success).toBe(true);
 
-      // preSwapWithMultiPool should have been called with byAmountIn=true and
-      // the initial spot-price estimate (1_000_000 at price=1).
-      expect(mockSdk.Swap.preSwapWithMultiPool).toHaveBeenCalledTimes(1);
-      const quoteCallArgs = mockSdk.Swap.preSwapWithMultiPool.mock.calls[0][0];
-      expect(quoteCallArgs.byAmountIn).toBe(true);
-      expect(quoteCallArgs.a2b).toBe(true);
+      // getBestRouter must be called twice: once for the quote (call 0) and
+      // once for the actual swap (call 1).
+      expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledTimes(2);
 
-      // The aggregator must use byAmountIn=true (exactIn with buffer).
-      const routerCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[0];
-      const aggByAmountIn = routerCallArgs[3];
-      const aggAmount = routerCallArgs[2];
+      // Quote call (index 0): byAmountIn=true, amount = estimatedInput ≈ 1_000_000
+      const quoteCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[0];
+      expect(quoteCallArgs[3]).toBe(true);   // byAmountIn
+      expect(quoteCallArgs[7].a2b).toBe(true);
+
+      // Actual swap call (index 1): byAmountIn=true with buffered input.
+      // priceImpactBps = (1_000_000 − 950_000) × 10_000 / 950_000 ≈ 526 bps
+      // bufBps = slipBps(100) + priceImpactBps(526) = 626 → bufferedInput ≈ 1_062_600
+      const swapCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[1];
+      const aggByAmountIn = swapCallArgs[3];
+      const aggAmount = swapCallArgs[2];
       expect(aggByAmountIn).toBe(true);
-
-      // With priceImpact=5% and maxSlippage=1%, buffer = 6%.
-      // Initial estimate = 1_000_000, buffered = 1_060_000.
       expect(aggAmount).toBeGreaterThanOrEqual(1_060_000);
     } finally {
       buildAggSpy.mockRestore();
     }
   });
 
-  it('falls back to static buffer when the pre-swap quote call throws', async () => {
-    // When sdk.Swap.preSwapWithMultiPool throws (e.g., SDK version mismatch or
-    // network error), the bot must fall back to the existing static buffer of
+  it('falls back to static buffer when the aggregator quote call throws', async () => {
+    // When the first getBestRouter call (used for the pre-swap quote) throws
+    // (e.g., network error), the bot must fall back to the static buffer of
     // max(3×maxSlippage, 5%) rather than failing the swap entirely.
+    // The second getBestRouter call (actual swap) still succeeds normally.
     process.env.DRY_RUN = 'false';
 
     const pool = makePoolInfo({
@@ -3465,12 +3488,13 @@ describe('wallet balance checks before opening a new position', () => {
 
     const mockSdk = {
       RouterV2: {
-        getBestRouter: jest.fn().mockResolvedValue({ result: aggregatorResult, version: 'v2' }),
+        // First call (quote) throws; second call (actual swap) succeeds.
+        getBestRouter: jest.fn()
+          .mockRejectedValueOnce(new Error('quote unavailable'))
+          .mockResolvedValueOnce({ result: aggregatorResult, version: 'v2' }),
       },
       Swap: {
         createSwapTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
-        // Simulate a quote failure
-        preSwapWithMultiPool: jest.fn().mockRejectedValue(new Error('quote unavailable')),
       },
       Position: {
         openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
@@ -3530,11 +3554,11 @@ describe('wallet balance checks before opening a new position', () => {
       expect(result).not.toBeNull();
       expect(result!.success).toBe(true);
 
-      // preSwapWithMultiPool was attempted and threw.
-      expect(mockSdk.Swap.preSwapWithMultiPool).toHaveBeenCalledTimes(1);
+      // getBestRouter called twice: first (quote) throws, second (actual swap) succeeds.
+      expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledTimes(2);
 
-      // The aggregator must still use byAmountIn=true with the static buffer.
-      const routerCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[0];
+      // The actual swap call (index 1) must still use byAmountIn=true with static buffer.
+      const routerCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[1];
       const aggByAmountIn = routerCallArgs[3];
       const aggAmount = routerCallArgs[2];
       expect(aggByAmountIn).toBe(true);

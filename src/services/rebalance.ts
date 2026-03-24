@@ -653,15 +653,23 @@ export class RebalanceService {
       }
 
       // Add buffer to cover price impact, fees, and execution slippage.
-      // Fetch a pre-swap quote from the aggregator to derive the actual price
-      // impact for this swap size, then combine it with the configured slippage
-      // tolerance.  Buffer = maxSlippage + estimatedPriceImpact.
-      // If the quote call fails, fall back to 3× maxSlippage or 5%, whichever
-      // is larger.
+      // Use the aggregator router (getBestRouter) to estimate the output for
+      // estimatedInput so the buffer reflects the aggregator's actual routing
+      // path.  A direct-pool quote (preSwapWithMultiPool) can underestimate
+      // the real slippage when the aggregator routes through different pools
+      // with a lower effective rate, causing the swap to fall short of the
+      // deficit.  Buffer = maxSlippage + priceImpact (5% floor).
+      //
+      // priceImpact = (deficit − aggOutput) / aggOutput — using aggOutput as
+      // the denominator guarantees bufferedInput × aggRate ≥ deficit:
+      //   bufferedInput = estimatedInput × (1 + priceImpact + slippage)
+      //                 = estimatedInput × deficit / aggOutput × (1 + slippage)
+      //   aggOutput = estimatedInput × aggRate
+      //   ⟹ bufferedInput × aggRate = deficit × (1 + slippage) ≥ deficit
       const minBps = 500n; // 5% floor
       let bufBps: bigint;
       try {
-        const preQuoteParams: PreSwapWithMultiPoolParams = {
+        const quoteSwapParams: PreSwapWithMultiPoolParams = {
           poolAddresses: [poolInfo.poolAddress],
           a2b,
           byAmountIn: true,
@@ -669,22 +677,28 @@ export class RebalanceService {
           coinTypeA: poolInfo.coinTypeA,
           coinTypeB: poolInfo.coinTypeB,
         };
-        const quote = await sdk.Swap.preSwapWithMultiPool(preQuoteParams);
-        if (quote && !quote.isExceed) {
-          const estimatedOutput = BigInt(quote.estimatedAmountOut.toString());
-          // estimatedInput was computed as deficitAmount / spotPrice, so at the
-          // spot rate it should produce exactly swapAmount (deficitAmount) of
-          // output.  Any shortfall in estimatedOutput versus swapAmount is
-          // directly attributable to fees and price impact.  Clamped to ≥ 0.
-          const priceImpactBps = estimatedOutput < swapAmount && swapAmount > 0n
-            ? (swapAmount - estimatedOutput) * 10000n / swapAmount
+        const { result: aggQuote } = await this.withSuppressedSdkRouterNoise(() =>
+          sdk.RouterV2.getBestRouter(
+            fromCoin,
+            toCoin,
+            Number(estimatedInput),
+            true,
+            0,
+            '',
+            '',
+            quoteSwapParams,
+          )
+        );
+        if (aggQuote && !aggQuote.isExceed && Number(aggQuote.outputAmount) > 0) {
+          const estimatedOutput = BigInt(Math.floor(Number(aggQuote.outputAmount)));
+          // Using estimatedOutput as denominator so that bufferedInput × aggRate
+          // equals swapAmount (deficit) before the slippage margin is added.
+          const priceImpactBps = estimatedOutput < swapAmount && estimatedOutput > 0n
+            ? (swapAmount - estimatedOutput) * 10000n / estimatedOutput
             : 0n;
           const slipBps = BigInt(Math.ceil(this.config.maxSlippage * 10000));
           bufBps = slipBps + priceImpactBps;
-          logger.info('Deficit swap: using quote-driven buffer', {
-            // swapAmount = deficit to cover; estimatedInput = spot-price estimate
-            // for obtaining that deficit; estimatedOutput = what the quote
-            // actually delivers for estimatedInput.
+          logger.info('Deficit swap: using aggregator-quote-driven buffer', {
             deficitAmount: swapAmount.toString(),
             estimatedInput: estimatedInput.toString(),
             estimatedOutput: estimatedOutput.toString(),
@@ -698,8 +712,7 @@ export class RebalanceService {
           bufBps = slipBps > minBps ? slipBps : minBps;
         }
       } catch {
-        // If the pre-swap quote call fails (e.g., network error or SDK version
-        // does not support preSwapWithMultiPool), fall back to the static buffer.
+        // If the aggregator quote call fails, fall back to the static buffer.
         const slipBps = BigInt(Math.ceil(this.config.maxSlippage * 3 * 10000));
         bufBps = slipBps > minBps ? slipBps : minBps;
       }

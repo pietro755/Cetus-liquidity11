@@ -653,9 +653,9 @@ export class RebalanceService {
       }
 
       // Add buffer to cover price impact, fees, and execution slippage.
-      // Use 3× maxSlippage or a 5 % floor, whichever is larger.
+      // Use 3× maxSlippage or a 5% floor, whichever is larger.
       const slipBps = BigInt(Math.ceil(this.config.maxSlippage * 3 * 10000));
-      const minBps = 500n; // 5 %
+      const minBps = 500n; // 5%
       const bufBps = slipBps > minBps ? slipBps : minBps;
       estimatedInput = estimatedInput * (10000n + bufBps) / 10000n;
 

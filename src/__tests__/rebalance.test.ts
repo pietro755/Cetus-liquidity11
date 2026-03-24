@@ -3285,6 +3285,267 @@ describe('wallet balance checks before opening a new position', () => {
     }
   });
 
+  it('uses quote-driven price impact in deficit-swap buffer when preSwapWithMultiPool succeeds', async () => {
+    // When sdk.Swap.preSwapWithMultiPool returns a quote whose estimatedAmountOut
+    // is less than the deficit (due to fees / price impact), the bot must scale
+    // up the aggregator input amount to account for both the slippage tolerance
+    // and the measured price impact.
+    //
+    // Setup (sqrtPrice=2^64 → price=1, totalUsd=2_000_000):
+    //   requiredAmountA = 1_000_000, requiredAmountB = 1_000_000
+    //   walletA = 1_100_000, walletB = 0  → deficitB = 1_000_000
+    //   Initial spot estimate: estimatedInput = 1_000_000 (at price=1)
+    //   Quote returns estimatedAmountOut = 950_000  → priceImpact = 5%
+    //   maxSlippage = 1%
+    //   Buffer = 1% + 5% = 6%  → bufferedInput = 1_000_000 * 1.06 = 1_060_000
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616', // 2^64 → price = 1
+      tickSpacing: 10,
+    });
+    const monitor = makeMonitor([], pool);
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '2000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const aggregatorResult = {
+      isExceed: false,
+      isTimeout: false,
+      inputAmount: 1060000,
+      outputAmount: 1000000,
+      fromCoin: '0xcoinA',
+      toCoin: '0xcoinB',
+      byAmountIn: true,
+      splitPaths: [{ percent: 100, inputAmount: 1060000, outputAmount: 1000000, pathIndex: 0, basePaths: [] }],
+    };
+
+    // Pre-swap quote: estimatedAmountOut = 950_000 (5% below the 1_000_000 deficit)
+    const preSwapQuote = {
+      poolAddress: '0xpool',
+      estimatedAmountIn: '1000000',
+      estimatedAmountOut: '950000',
+      estimatedEndSqrtPrice: '18000000000000000000',
+      estimatedStartSqrtPrice: '18446744073709551616',
+      estimatedFeeAmount: '3000',
+      isExceed: false,
+      amount: '1000000',
+      aToB: true,
+      byAmountIn: true,
+    };
+
+    const mockSdk = {
+      RouterV2: {
+        getBestRouter: jest.fn().mockResolvedValue({ result: aggregatorResult, version: 'v2' }),
+      },
+      Swap: {
+        createSwapTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        preSwapWithMultiPool: jest.fn().mockResolvedValue(preSwapQuote),
+      },
+      Position: {
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload: jest.fn().mockResolvedValue(mockTxStub),
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    let getBalanceCallCount = 0;
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xswap',
+          balanceChanges: [],
+        })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 2) {
+          return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '1100000' : '0' });
+        }
+        return Promise.resolve({ totalBalance: POST_SWAP_BALANCE });
+      }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    let sdkBalanceCallCount = 0;
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockImplementation((coinType: string) => {
+        sdkBalanceCallCount++;
+        if (sdkBalanceCallCount <= 2) {
+          return Promise.resolve(coinType === '0xcoinA' ? '1100000' : '0');
+        }
+        return Promise.resolve(POST_SWAP_BALANCE);
+      }),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const buildAggSpy = jest
+      .spyOn(TransactionUtil, 'buildAggregatorSwapTransaction')
+      .mockResolvedValue(mockTxStub as any);
+
+    try {
+      const svc = new RebalanceService(sdkService, monitor, config);
+      const result = await svc.checkAndRebalance('0xpool');
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(true);
+
+      // preSwapWithMultiPool should have been called with byAmountIn=true and
+      // the initial spot-price estimate (1_000_000 at price=1).
+      expect(mockSdk.Swap.preSwapWithMultiPool).toHaveBeenCalledTimes(1);
+      const quoteCallArgs = mockSdk.Swap.preSwapWithMultiPool.mock.calls[0][0];
+      expect(quoteCallArgs.byAmountIn).toBe(true);
+      expect(quoteCallArgs.a2b).toBe(true);
+
+      // The aggregator must use byAmountIn=true (exactIn with buffer).
+      const routerCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[0];
+      const aggByAmountIn = routerCallArgs[3];
+      const aggAmount = routerCallArgs[2];
+      expect(aggByAmountIn).toBe(true);
+
+      // With priceImpact=5% and maxSlippage=1%, buffer = 6%.
+      // Initial estimate = 1_000_000, buffered = 1_060_000.
+      expect(aggAmount).toBeGreaterThanOrEqual(1_060_000);
+    } finally {
+      buildAggSpy.mockRestore();
+    }
+  });
+
+  it('falls back to static buffer when the pre-swap quote call throws', async () => {
+    // When sdk.Swap.preSwapWithMultiPool throws (e.g., SDK version mismatch or
+    // network error), the bot must fall back to the existing static buffer of
+    // max(3×maxSlippage, 5%) rather than failing the swap entirely.
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616', // 2^64 → price = 1
+      tickSpacing: 10,
+    });
+    const monitor = makeMonitor([], pool);
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '2000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const aggregatorResult = {
+      isExceed: false,
+      isTimeout: false,
+      inputAmount: 1050000,
+      outputAmount: 1000000,
+      fromCoin: '0xcoinA',
+      toCoin: '0xcoinB',
+      byAmountIn: true,
+      splitPaths: [{ percent: 100, inputAmount: 1050000, outputAmount: 1000000, pathIndex: 0, basePaths: [] }],
+    };
+
+    const mockSdk = {
+      RouterV2: {
+        getBestRouter: jest.fn().mockResolvedValue({ result: aggregatorResult, version: 'v2' }),
+      },
+      Swap: {
+        createSwapTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        // Simulate a quote failure
+        preSwapWithMultiPool: jest.fn().mockRejectedValue(new Error('quote unavailable')),
+      },
+      Position: {
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload: jest.fn().mockResolvedValue(mockTxStub),
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    let getBalanceCallCount = 0;
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xswap',
+          balanceChanges: [],
+        })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn().mockImplementation(({ coinType }: { coinType: string }) => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 2) {
+          return Promise.resolve({ totalBalance: coinType === '0xcoinA' ? '1100000' : '0' });
+        }
+        return Promise.resolve({ totalBalance: POST_SWAP_BALANCE });
+      }),
+      getCoins: jest.fn().mockResolvedValue({ data: [] }),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    let sdkBalanceCallCount = 0;
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockImplementation((coinType: string) => {
+        sdkBalanceCallCount++;
+        if (sdkBalanceCallCount <= 2) {
+          return Promise.resolve(coinType === '0xcoinA' ? '1100000' : '0');
+        }
+        return Promise.resolve(POST_SWAP_BALANCE);
+      }),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const buildAggSpy = jest
+      .spyOn(TransactionUtil, 'buildAggregatorSwapTransaction')
+      .mockResolvedValue(mockTxStub as any);
+
+    try {
+      const svc = new RebalanceService(sdkService, monitor, config);
+      const result = await svc.checkAndRebalance('0xpool');
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(true);
+
+      // preSwapWithMultiPool was attempted and threw.
+      expect(mockSdk.Swap.preSwapWithMultiPool).toHaveBeenCalledTimes(1);
+
+      // The aggregator must still use byAmountIn=true with the static buffer.
+      const routerCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[0];
+      const aggByAmountIn = routerCallArgs[3];
+      const aggAmount = routerCallArgs[2];
+      expect(aggByAmountIn).toBe(true);
+
+      // Static fallback: buffer = max(3×1%, 5%) = 5% → 1_000_000 * 1.05 = 1_050_000.
+      expect(aggAmount).toBeGreaterThanOrEqual(1_050_000);
+    } finally {
+      buildAggSpy.mockRestore();
+    }
+  });
+
   it('preloads router token metadata so the aggregator transaction can still be built', async () => {
     process.env.DRY_RUN = 'false';
 

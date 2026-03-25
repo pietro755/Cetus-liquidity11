@@ -503,16 +503,20 @@ export class RebalanceService {
       });
 
       if (deficitA > 0n && bigB > 0n) {
-        // Need more A: swap B → A, targeting deficitA output (exactOut)
+        // Need more A: swap B → A, targeting deficitA + 5% buffer output (exactOut).
+        // The 5% buffer ensures the swap delivers enough to satisfy the position
+        // requirement even when price impact or slippage exceeds the inner buffer.
         a2b = false;
-        swapAmount = deficitA;
+        swapAmount = deficitA * 105n / 100n;
         byAmountIn = false;
         isDeficitSwap = true;
         logger.debug('[DEBUG] Swap direction: B→A');
       } else if (deficitB > 0n && bigA > 0n) {
-        // Need more B: swap A → B, targeting deficitB output (exactOut)
+        // Need more B: swap A → B, targeting deficitB + 5% buffer output (exactOut).
+        // The 5% buffer ensures the swap delivers enough to satisfy the position
+        // requirement even when price impact or slippage exceeds the inner buffer.
         a2b = true;
-        swapAmount = deficitB;
+        swapAmount = deficitB * 105n / 100n;
         byAmountIn = false;
         isDeficitSwap = true;
         logger.debug('[DEBUG] Swap direction: A→B');

@@ -3180,7 +3180,8 @@ describe('wallet balance checks before opening a new position', () => {
     //   requiredAmountA = 1_000_000, requiredAmountB = 1_000_000
     //   walletA = 1_100_000  (surplus = 100_000)
     //   walletB = 0          (deficitB = 1_000_000; swapAmount = 1_050_000 after 5% buffer)
-    //   estimatedInput = 1_050_000 * 1.05 = 1_102_500  (capped at bigA = 1_100_000)
+    //   estimatedInput = 1_050_000 * 1.05 (buf) = 1_102_500,
+    //   then A→B extra 5%: 1_102_500 * 1.05 = 1_157_625 (capped at bigA = 1_100_000)
     //
     // Old behaviour: cap at surplus (100_000) → aggAmount = 100_000  (WRONG)
     // New behaviour: cap at bigA  (1_100_000) → aggAmount = 1_100_000 (OK)
@@ -3320,6 +3321,7 @@ describe('wallet balance checks before opening a new position', () => {
     //     priceImpactBps = (1_050_000 − 950_000) × 10_000 / 950_000 ≈ 1052 bps
     //   maxSlippage = 1% (slipBps = 100)
     //   bufBps = 100 + 1052 = 1152  → bufferedInput ≈ 1_050_000 × 1.1152 ≈ 1_170_960
+    //   A→B extra 5%: 1_170_960 × 1.05 ≈ 1_229_508
     //   Capped at bigA = 1_100_000  → aggAmount = 1_100_000
     //   Actual swap uses bufferedInput (call 2) ≥ 1_060_000.
     process.env.DRY_RUN = 'false';
@@ -3567,7 +3569,8 @@ describe('wallet balance checks before opening a new position', () => {
       const aggAmount = routerCallArgs[2];
       expect(aggByAmountIn).toBe(true);
 
-      // Static fallback: buffer = max(3×1%, 5%) = 5% → 1_000_000 * 1.05 = 1_050_000.
+      // Static fallback: buffer = max(3×1%, 5%) = 5% → 1_050_000 * 1.05 = 1_102_500,
+      // then A→B extra 5% → 1_157_625, capped at bigA=1_100_000.
       expect(aggAmount).toBeGreaterThanOrEqual(1_050_000);
     } finally {
       buildAggSpy.mockRestore();

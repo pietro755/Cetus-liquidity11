@@ -731,6 +731,15 @@ export class RebalanceService {
       if (bufBps < minBps) bufBps = minBps;
       estimatedInput = estimatedInput * (10000n + bufBps) / 10000n;
 
+      // For A→B deficit swaps, add an extra 5% to the input amount on top of
+      // the existing buffer.  On-chain execution consistently delivers fewer
+      // tokens than the aggregator quotes (price moves between quote and
+      // execution, multi-hop routing fees, etc.), so the extra margin ensures
+      // the swap output reliably covers the B deficit.
+      if (a2b) {
+        estimatedInput = estimatedInput * 105n / 100n;
+      }
+
       // Cap at the total available source token balance so we never attempt
       // to spend more than the wallet holds.  We intentionally allow the swap
       // to use beyond the position's reserved share of the source token: after

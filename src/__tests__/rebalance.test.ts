@@ -1218,8 +1218,9 @@ describe('rebalance – both tokens present with out-of-range new position trigg
     expect(swap.a2b).toBe(false);          // B → A
     // TOTAL_USD=1,000,000 below range targets the full budget in token A:
     // requiredA = floor(1,000,000 * 2^128 / sqrtPrice^2) = 951,231.
-    // Starting from 500,000 A, the exact-out deficit is therefore 451,231 A.
-    expect(swap.amount).toBe('451231');
+    // Starting from 500,000 A, the raw deficit is 451,231 A; with the 5% buffer
+    // the swap targets 451231 * 105 / 100 = 473,792 A.
+    expect(swap.amount).toBe('473792');
   });
 
   it('swaps only the token-A deficit needed to restore the above-range target allocation', async () => {
@@ -1231,9 +1232,9 @@ describe('rebalance – both tokens present with out-of-range new position trigg
       '500000',   // tokenAmountB (already have some B)
     );
     expect(swap.a2b).toBe(true);           // A → B
-    // Above range, the full TOTAL_USD budget maps to token B only, so the exact-out
-    // deficit equals 500,000 B when the wallet already holds 500,000 B.
-    expect(swap.amount).toBe('500000');
+    // Above range, the full TOTAL_USD budget maps to token B only.  The raw
+    // deficit equals 500,000 B; with the 5% buffer the swap targets 525,000 B.
+    expect(swap.amount).toBe('525000');
   });
 });
 
@@ -1433,11 +1434,12 @@ describe('rebalance – CLMM-optimal swap amount for in-range single-token case'
 
     expect(swap.a2b).toBe(true); // A → B
 
-    // The optimal swap must never exceed the old half-swap heuristic and may
-    // equal it once the env-defined rebalance target is applied as the cap.
+    // The optimal swap must never exceed the old half-swap heuristic plus the
+    // 5% upfront buffer applied to the deficit.  deficitB = requiredAmountB =
+    // halfUsd = 500_000; with the 5% buffer swapAmount = 525_000.
     const swapAmt = BigInt(swap.amount);
     expect(swapAmt).toBeGreaterThan(0n);
-    expect(swapAmt).toBeLessThanOrEqual(500_000n);
+    expect(swapAmt).toBeLessThanOrEqual(525_000n);
   });
 
   it('swaps a smaller B fraction when the new range is skewed toward B (near upper tick)', async () => {
@@ -3177,11 +3179,11 @@ describe('wallet balance checks before opening a new position', () => {
     // Setup (sqrtPrice=2^64 → price=1, totalUsd=2_000_000):
     //   requiredAmountA = 1_000_000, requiredAmountB = 1_000_000
     //   walletA = 1_100_000  (surplus = 100_000)
-    //   walletB = 0          (deficitB = 1_000_000)
-    //   estimatedInput = 1_000_000 * 1.05 = 1_050_000
+    //   walletB = 0          (deficitB = 1_000_000; swapAmount = 1_050_000 after 5% buffer)
+    //   estimatedInput = 1_050_000 * 1.05 = 1_102_500  (capped at bigA = 1_100_000)
     //
     // Old behaviour: cap at surplus (100_000) → aggAmount = 100_000  (WRONG)
-    // New behaviour: cap at bigA  (1_100_000) → aggAmount = 1_050_000 (OK)
+    // New behaviour: cap at bigA  (1_100_000) → aggAmount = 1_100_000 (OK)
     process.env.DRY_RUN = 'false';
 
     const pool = makePoolInfo({
@@ -3204,12 +3206,12 @@ describe('wallet balance checks before opening a new position', () => {
     const v1FallbackResult = {
       isExceed: false,
       isTimeout: true,
-      inputAmount: 1050000,
-      outputAmount: 1000000,
+      inputAmount: 1100000,
+      outputAmount: 1050000,
       fromCoin: '0xcoinA',
       toCoin: '0xcoinB',
       byAmountIn: true,
-      splitPaths: [{ percent: 100, inputAmount: 1050000, outputAmount: 1000000, pathIndex: 0, basePaths: [] }],
+      splitPaths: [{ percent: 100, inputAmount: 1100000, outputAmount: 1050000, pathIndex: 0, basePaths: [] }],
     };
 
     const mockSdk = {
@@ -3301,7 +3303,7 @@ describe('wallet balance checks before opening a new position', () => {
 
   it('uses aggregator-quote-driven price impact in deficit-swap buffer', async () => {
     // When the aggregator (getBestRouter) returns a quote whose outputAmount is
-    // less than the deficit (due to routing fees / price impact), the bot must
+    // less than the swap target (due to routing fees / price impact), the bot must
     // scale up the input amount to account for both the slippage tolerance and
     // the measured price impact.
     //
@@ -3312,12 +3314,14 @@ describe('wallet balance checks before opening a new position', () => {
     // Setup (sqrtPrice=2^64 → price=1, totalUsd=2_000_000):
     //   requiredAmountA = 1_000_000, requiredAmountB = 1_000_000
     //   walletA = 1_100_000, walletB = 0  → deficitB = 1_000_000
-    //   Initial spot estimate: estimatedInput = 1_000_000 (at price=1)
-    //   Quote (call 1) returns outputAmount = 950_000  → priceImpact = 5.26%
-    //     priceImpactBps = (1_000_000 − 950_000) × 10_000 / 950_000 ≈ 526 bps
+    //   swapAmount = 1_000_000 * 1.05 = 1_050_000  (5% upfront buffer)
+    //   Initial spot estimate: estimatedInput = 1_050_000 (at price=1)
+    //   Quote (call 1) returns outputAmount = 950_000  → priceImpact ≈ 10.5%
+    //     priceImpactBps = (1_050_000 − 950_000) × 10_000 / 950_000 ≈ 1052 bps
     //   maxSlippage = 1% (slipBps = 100)
-    //   bufBps = 100 + 526 = 626  → bufferedInput = 1_000_000 × 1.0626 ≈ 1_062_600
-    //   Actual swap uses bufferedInput (call 2).
+    //   bufBps = 100 + 1052 = 1152  → bufferedInput ≈ 1_050_000 × 1.1152 ≈ 1_170_960
+    //   Capped at bigA = 1_100_000  → aggAmount = 1_100_000
+    //   Actual swap uses bufferedInput (call 2) ≥ 1_060_000.
     process.env.DRY_RUN = 'false';
 
     const pool = makePoolInfo({
@@ -3433,14 +3437,14 @@ describe('wallet balance checks before opening a new position', () => {
       // once for the actual swap (call 1).
       expect(mockSdk.RouterV2.getBestRouter).toHaveBeenCalledTimes(2);
 
-      // Quote call (index 0): byAmountIn=true, amount = estimatedInput ≈ 1_000_000
+      // Quote call (index 0): byAmountIn=true, amount = estimatedInput ≈ 1_050_000
       const quoteCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[0];
       expect(quoteCallArgs[3]).toBe(true);   // byAmountIn
       expect(quoteCallArgs[7].a2b).toBe(true);
 
       // Actual swap call (index 1): byAmountIn=true with buffered input.
-      // priceImpactBps = (1_000_000 − 950_000) × 10_000 / 950_000 ≈ 526 bps
-      // bufBps = slipBps(100) + priceImpactBps(526) = 626 → bufferedInput ≈ 1_062_600
+      // priceImpactBps = (1_050_000 − 950_000) × 10_000 / 950_000 ≈ 1052 bps
+      // bufBps = slipBps(100) + priceImpactBps(1052) = 1152 → bufferedInput ≈ 1_100_000 (capped)
       const swapCallArgs = mockSdk.RouterV2.getBestRouter.mock.calls[1];
       const aggByAmountIn = swapCallArgs[3];
       const aggAmount = swapCallArgs[2];
@@ -3572,17 +3576,18 @@ describe('wallet balance checks before opening a new position', () => {
 
   it('falls back to direct pool exactOut when the aggregator route output is insufficient for the deficit', async () => {
     // Regression: when the aggregator routing engine returns an outputAmount
-    // less than the deficit (even after the exactIn buffer has been applied),
-    // the bot must not use that route.  It must instead fall back to the direct
-    // single-pool exactOut swap, which guarantees delivery of exactly the deficit
-    // amount.
+    // less than the buffered swap target (even after the exactIn buffer has been
+    // applied), the bot must not use that route.  It must instead fall back to
+    // the direct single-pool exactOut swap, which guarantees delivery of the
+    // full buffered amount.
     //
     // Setup (sqrtPrice=2^64 → price=1, totalUsd=2_000_000):
     //   requiredAmountA = 1_000_000, requiredAmountB = 1_000_000
     //   walletA = 1_100_000, walletB = 0  → deficitB = 1_000_000
-    //   Quote (call 1): outputAmount = 950_000 < deficit → priceImpact buffer applied
-    //   Swap route (call 2): outputAmount = 890_000 < deficit → aggregator MUST be rejected
-    //   Expected: direct pool exactOut used (by_amount_in=false, amount=1_000_000)
+    //   swapAmount = 1_000_000 * 1.05 = 1_050_000  (5% upfront buffer)
+    //   Quote (call 1): outputAmount = 950_000 < swapAmount → priceImpact buffer applied
+    //   Swap route (call 2): outputAmount = 890_000 < swapAmount → aggregator MUST be rejected
+    //   Expected: direct pool exactOut used (by_amount_in=false, amount=1_050_000)
     process.env.DRY_RUN = 'false';
 
     const pool = makePoolInfo({
@@ -3701,9 +3706,9 @@ describe('wallet balance checks before opening a new position', () => {
         by_amount_in: boolean;
         amount: string;
       };
-      // Direct pool exactOut: by_amount_in=false, amount = deficit (1_000_000)
+      // Direct pool exactOut: by_amount_in=false, amount = deficitB + 5% buffer (1_050_000)
       expect(swapArgs.by_amount_in).toBe(false);
-      expect(swapArgs.amount).toBe('1000000');
+      expect(swapArgs.amount).toBe('1050000');
     } finally {
       buildAggSpy.mockRestore();
     }

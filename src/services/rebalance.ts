@@ -1965,3 +1965,105 @@ export class RebalanceService {
   }
 
 }
+
+// ---------------------------------------------------------------------------
+// Standalone utility functions
+// ---------------------------------------------------------------------------
+
+/**
+ * Calculates the optimal swap amount needed to move current token balances
+ * toward target balances, with a 2% buffer for price impact and slippage.
+ *
+ * Returns the swap input amount and direction, or null when no swap is needed.
+ */
+export function calculateOptimalSwapAmount(
+  currentA: bigint,
+  currentB: bigint,
+  targetA: bigint,
+  targetB: bigint,
+  currentPrice: number,
+): { amountIn: bigint; fromToken: 'A' | 'B' } | null {
+  const deficitA = targetA > currentA ? targetA - currentA : 0n;
+  const deficitB = targetB > currentB ? targetB - currentB : 0n;
+  const surplusA = currentA > targetA ? currentA - targetA : 0n;
+  const surplusB = currentB > targetB ? currentB - targetB : 0n;
+
+  if (surplusA > 0n && deficitB > 0n) {
+    // Surplus A, need more B — swap A→B.
+    // Add 2% buffer for price impact/slippage.
+    const requiredA = BigInt(Math.ceil(Number(deficitB) / currentPrice * 1.02));
+    return {
+      amountIn: surplusA > requiredA ? requiredA : surplusA,
+      fromToken: 'A',
+    };
+  }
+
+  if (surplusB > 0n && deficitA > 0n) {
+    // Surplus B, need more A — swap B→A.
+    // Add 2% buffer for price impact/slippage.
+    const requiredB = BigInt(Math.ceil(Number(deficitA) * currentPrice * 1.02));
+    return {
+      amountIn: surplusB > requiredB ? requiredB : surplusB,
+      fromToken: 'B',
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Executes a swap with retry logic, increasing the input amount by 1% per
+ * attempt to account for cumulative slippage or price movement between retries.
+ *
+ * @param execute - Callback that performs one swap attempt for the given amount.
+ *                  Returns true on success, false when the swap result is
+ *                  unsuccessful but no error was thrown.
+ * @param fromToken - Coin type being spent.
+ * @param toToken   - Coin type being received.
+ * @param amountIn  - Base input amount before per-attempt adjustment.
+ * @param slippage  - Maximum allowed slippage (0–1, e.g. 0.01 for 1 %).
+ * @param maxRetries - Maximum number of attempts (default 3).
+ * @returns true when a swap attempt succeeds, false when all non-throwing
+ *          attempts fail.  Throws if the final attempt throws.
+ */
+export async function swapWithBuffer(
+  execute: (params: {
+    fromToken: string;
+    toToken: string;
+    amountIn: bigint;
+    slippage: number;
+    exactIn: boolean;
+  }) => Promise<{ success: boolean }>,
+  fromToken: string,
+  toToken: string,
+  amountIn: bigint,
+  slippage: number,
+  maxRetries = 3,
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      // Increase amount by 1% per retry attempt to account for slippage.
+      const adjustedAmount = amountIn * BigInt(100 + attempt) / 100n;
+
+      logger.info(`Swap attempt ${attempt}: amount=${adjustedAmount} (base=${amountIn})`);
+
+      const result = await execute({
+        fromToken,
+        toToken,
+        amountIn: adjustedAmount,
+        slippage,
+        exactIn: true,
+      });
+
+      if (result.success) {
+        logger.info(`Swap successful on attempt ${attempt}`);
+        return true;
+      }
+    } catch (error) {
+      logger.warn(`Swap attempt ${attempt} failed: ${error}`);
+      if (attempt === maxRetries) throw error;
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+  return false;
+}

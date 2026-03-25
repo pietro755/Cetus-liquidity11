@@ -781,18 +781,37 @@ export class RebalanceService {
         !result.isExceed &&
         result.splitPaths.length > 0
       ) {
-        swapTx = await this.withSuppressedSdkRouterNoise(() => TransactionUtil.buildAggregatorSwapTransaction(
-          sdk,
-          result,
-          allCoinAsset,
-          '',                          // no partner
-          this.config.maxSlippage,
-        ));
-        logger.info('Using aggregator route', {
-          inputAmount: result.inputAmount,
-          outputAmount: result.outputAmount,
-          paths: result.splitPaths.length,
-        });
+        // For deficit swaps using exactIn+buffer, verify the route's expected
+        // output covers the deficit.  The buffer in aggSwapAmount was sized so
+        // the aggregator should return outputAmount ≥ swapAmount (deficit), but
+        // the routing engine may pick a different path for the larger buffered
+        // amount that yields fewer tokens than needed.  When the expected output
+        // falls short, fall back to the direct-pool exactOut swap which
+        // guarantees delivery of exactly swapAmount.
+        const routeOutputInsufficient =
+          isDeficitSwap &&
+          aggByAmountIn &&
+          BigInt(Math.floor(result.outputAmount)) < swapAmount;
+
+        if (routeOutputInsufficient) {
+          logger.warn('Aggregator route output insufficient for deficit — falling back to direct pool exactOut', {
+            routeOutputAmount: result.outputAmount,
+            requiredAmount: swapAmount.toString(),
+          });
+        } else {
+          swapTx = await this.withSuppressedSdkRouterNoise(() => TransactionUtil.buildAggregatorSwapTransaction(
+            sdk,
+            result,
+            allCoinAsset,
+            '',                          // no partner
+            this.config.maxSlippage,
+          ));
+          logger.info('Using aggregator route', {
+            inputAmount: result.inputAmount,
+            outputAmount: result.outputAmount,
+            paths: result.splitPaths.length,
+          });
+        }
       } else {
         logger.warn('Aggregator returned no usable route — falling back to direct pool swap', {
           isExceed: result?.isExceed,

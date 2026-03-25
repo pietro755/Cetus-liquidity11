@@ -662,14 +662,18 @@ export class RebalanceService {
       // path.  A direct-pool quote (preSwapWithMultiPool) can underestimate
       // the real slippage when the aggregator routes through different pools
       // with a lower effective rate, causing the swap to fall short of the
-      // deficit.  Buffer = maxSlippage + priceImpact (5% floor).
+      // deficit.  Buffer = 2×maxSlippage + priceImpact (5% floor).
       //
-      // priceImpact = (deficit − aggOutput) / aggOutput — using aggOutput as
-      // the denominator guarantees bufferedInput × aggRate ≥ deficit:
-      //   bufferedInput = estimatedInput × (1 + priceImpact + slippage)
-      //                 = estimatedInput × deficit / aggOutput × (1 + slippage)
-      //   aggOutput = estimatedInput × aggRate
-      //   ⟹ bufferedInput × aggRate = deficit × (1 + slippage) ≥ deficit
+      // priceImpact = (deficit − aggOutput) / aggOutput.  Slippage is doubled
+      // because the transaction is submitted with maxSlippage tolerance:
+      //   • 1st slipBps: bridges the quote-rate → execution-rate gap so the
+      //     expected output covers the deficit.
+      //   • 2nd slipBps: absorbs execution slippage so the minimum guaranteed
+      //     output (expected × (1 − maxSlippage)) still covers the deficit.
+      //
+      //   bufferedInput × aggRate ≈ deficit × (1 + 2×s)
+      //   min actual = bufferedInput × aggRate × (1 − s)
+      //              ≈ deficit × (1 + 2s)(1 − s) = deficit × (1 + s − 2s²) > deficit ✓
       const minBps = 500n; // 5% floor
       let bufBps: bigint;
       try {
@@ -701,7 +705,11 @@ export class RebalanceService {
             ? (swapAmount - estimatedOutput) * 10000n / estimatedOutput
             : 0n;
           const slipBps = BigInt(Math.ceil(this.config.maxSlippage * 10000));
-          bufBps = slipBps + priceImpactBps;
+          // Double the slippage contribution: one to bridge the quote→expected
+          // gap and a second to absorb execution slippage so the minimum
+          // guaranteed output (expected × (1 − maxSlippage)) still covers the
+          // deficit after the transaction is settled on-chain.
+          bufBps = 2n * slipBps + priceImpactBps;
           logger.info('Deficit swap: using aggregator-quote-driven buffer', {
             deficitAmount: swapAmount.toString(),
             estimatedInput: estimatedInput.toString(),
@@ -786,21 +794,39 @@ export class RebalanceService {
         result.splitPaths.length > 0
       ) {
         // For deficit swaps using exactIn+buffer, verify the route's expected
-        // output covers the deficit.  The buffer in aggSwapAmount was sized so
-        // the aggregator should return outputAmount ≥ swapAmount (deficit), but
-        // the routing engine may pick a different path for the larger buffered
-        // amount that yields fewer tokens than needed.  When the expected output
-        // falls short, fall back to the direct-pool exactOut swap which
-        // guarantees delivery of exactly swapAmount.
+        // output covers the deficit even after worst-case execution slippage.
+        //
+        // The aggregator transaction is submitted with maxSlippage tolerance,
+        // so the actual output can be as low as:
+        //   result.outputAmount × (1 − maxSlippage)
+        //
+        // For that minimum to still cover the raw deficit:
+        //   result.outputAmount × (1 − maxSlippage) ≥ rawDeficit
+        //   ⟹ result.outputAmount ≥ rawDeficit / (1 − maxSlippage)
+        //
+        // We use max(swapAmount, minSafeOutput) so the check is never weaker
+        // than the existing swapAmount threshold.
+        const rawDeficit = a2b ? deficitB : deficitA;
+        // (1 − maxSlippage) in basis points; execSlipFactor = 0 only when
+        // maxSlippage ≥ 100%, which is not a valid configuration.  The guard
+        // execSlipFactor > 0n prevents a division-by-zero in that degenerate
+        // case and falls back to the swapAmount threshold instead.
+        const execSlipFactor = BigInt(Math.floor((1 - this.config.maxSlippage) * 10000));
+        const minSafeOutput = rawDeficit > 0n && execSlipFactor > 0n
+          ? rawDeficit * 10000n / execSlipFactor
+          : swapAmount;
+        const routeOutputThreshold = minSafeOutput > swapAmount ? minSafeOutput : swapAmount;
         const routeOutputInsufficient =
           isDeficitSwap &&
           aggByAmountIn &&
-          BigInt(Math.floor(result.outputAmount)) < swapAmount;
+          BigInt(Math.floor(result.outputAmount)) < routeOutputThreshold;
 
         if (routeOutputInsufficient) {
           logger.warn('Aggregator route output insufficient for deficit — falling back to direct pool exactOut', {
             routeOutputAmount: result.outputAmount,
-            requiredAmount: swapAmount.toString(),
+            requiredAmount: routeOutputThreshold.toString(),
+            rawDeficit: rawDeficit.toString(),
+            swapAmount: swapAmount.toString(),
           });
         } else {
           swapTx = await this.withSuppressedSdkRouterNoise(() => TransactionUtil.buildAggregatorSwapTransaction(

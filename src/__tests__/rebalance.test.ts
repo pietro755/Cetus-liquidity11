@@ -5,7 +5,7 @@
  * any external services.
  */
 
-import { RebalanceService } from '../services/rebalance';
+import { RebalanceService, calculateOptimalSwapAmount, swapWithBuffer } from '../services/rebalance';
 import { PositionMonitorService } from '../services/monitor';
 import { TransactionUtil } from '@cetusprotocol/cetus-sui-clmm-sdk';
 
@@ -3984,5 +3984,149 @@ describe('wallet balance checks before opening a new position', () => {
     expect(result).not.toBeNull();
     expect(result!.success).toBe(false);
     expect(result!.error).toMatch(/No usable balance to open initial position/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// calculateOptimalSwapAmount
+// ---------------------------------------------------------------------------
+
+describe('calculateOptimalSwapAmount', () => {
+  it('returns null when no surplus/deficit exists on either side', () => {
+    // Both tokens exactly at target — nothing to swap.
+    expect(calculateOptimalSwapAmount(1000n, 2000n, 1000n, 2000n, 2)).toBeNull();
+  });
+
+  it('returns null when there is only a surplus with no deficit on the other side', () => {
+    // Surplus A but also surplus B (no deficit) — no directional swap needed.
+    expect(calculateOptimalSwapAmount(2000n, 3000n, 1000n, 2000n, 2)).toBeNull();
+  });
+
+  it('swaps A→B when there is surplusA and deficitB', () => {
+    // currentA=2000, targetA=1000 → surplusA=1000
+    // currentB=500,  targetB=1000 → deficitB=500
+    // price=2 (A in terms of B), so requiredA = ceil(500/2 * 1.02) = ceil(255) = 255
+    const result = calculateOptimalSwapAmount(2000n, 500n, 1000n, 1000n, 2);
+    expect(result).not.toBeNull();
+    expect(result!.fromToken).toBe('A');
+    expect(result!.amountIn).toBe(255n); // min(surplusA=1000, requiredA=255) = 255
+  });
+
+  it('caps A→B swap at surplusA when requiredA exceeds surplusA', () => {
+    // currentA=1100, targetA=1000 → surplusA=100
+    // currentB=0,    targetB=1000 → deficitB=1000
+    // price=2, requiredA = ceil(1000/2 * 1.02) = ceil(510) = 510 > surplusA=100
+    const result = calculateOptimalSwapAmount(1100n, 0n, 1000n, 1000n, 2);
+    expect(result).not.toBeNull();
+    expect(result!.fromToken).toBe('A');
+    expect(result!.amountIn).toBe(100n); // capped at surplusA
+  });
+
+  it('swaps B→A when there is surplusB and deficitA', () => {
+    // currentA=500,  targetA=1000 → deficitA=500
+    // currentB=2000, targetB=1000 → surplusB=1000
+    // price=2 (A in terms of B), requiredB = ceil(500 * 2 * 1.02) = ceil(1020) = 1020
+    // surplusB=1000 < requiredB=1020 → capped at surplusB
+    const result = calculateOptimalSwapAmount(500n, 2000n, 1000n, 1000n, 2);
+    expect(result).not.toBeNull();
+    expect(result!.fromToken).toBe('B');
+    expect(result!.amountIn).toBe(1000n); // min(surplusB=1000, requiredB=1020) = 1000
+  });
+
+  it('caps B→A swap at surplusB when requiredB exceeds surplusB', () => {
+    // currentA=0,    targetA=1000 → deficitA=1000
+    // currentB=1100, targetB=1000 → surplusB=100
+    // price=2, requiredB = ceil(1000 * 2 * 1.02) = ceil(2040) = 2040 > surplusB=100
+    const result = calculateOptimalSwapAmount(0n, 1100n, 1000n, 1000n, 2);
+    expect(result).not.toBeNull();
+    expect(result!.fromToken).toBe('B');
+    expect(result!.amountIn).toBe(100n); // capped at surplusB
+  });
+
+  it('includes the 2% buffer in the computed requiredA amount', () => {
+    // price=1, deficitB=100 → requiredA = ceil(100/1 * 1.02) = 102
+    // surplusA=200 (currentA=300, targetA=100) is larger than requiredA=102,
+    // so the buffer-adjusted requiredA is the limiting factor.
+    const result = calculateOptimalSwapAmount(300n, 0n, 100n, 100n, 1);
+    expect(result).not.toBeNull();
+    expect(result!.fromToken).toBe('A');
+    expect(result!.amountIn).toBe(102n);
+  });
+
+  it('includes the 2% buffer in the computed requiredB amount', () => {
+    // price=1, deficitA=100 → requiredB = ceil(100 * 1 * 1.02) = 102
+    // surplusB=200 (currentB=300, targetB=100) is larger than requiredB=102,
+    // so the buffer-adjusted requiredB is the limiting factor.
+    const result = calculateOptimalSwapAmount(0n, 300n, 100n, 100n, 1);
+    expect(result).not.toBeNull();
+    expect(result!.fromToken).toBe('B');
+    expect(result!.amountIn).toBe(102n);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// swapWithBuffer
+// ---------------------------------------------------------------------------
+
+describe('swapWithBuffer', () => {
+  it('returns true when the first attempt succeeds', async () => {
+    const execute = jest.fn().mockResolvedValue({ success: true });
+    const result = await swapWithBuffer(execute, '0xcoinA', '0xcoinB', 1000n, 0.01);
+    expect(result).toBe(true);
+    expect(execute).toHaveBeenCalledTimes(1);
+    // Attempt 1 adjusts by +1%: 1000 * 101 / 100 = 1010
+    expect(execute).toHaveBeenCalledWith({
+      fromToken: '0xcoinA',
+      toToken: '0xcoinB',
+      amountIn: 1010n,
+      slippage: 0.01,
+      exactIn: true,
+    });
+  });
+
+  it('retries and succeeds on the second attempt', async () => {
+    const execute = jest.fn()
+      .mockResolvedValueOnce({ success: false })
+      .mockResolvedValueOnce({ success: true });
+    const result = await swapWithBuffer(execute, '0xcoinA', '0xcoinB', 1000n, 0.01);
+    expect(result).toBe(true);
+    expect(execute).toHaveBeenCalledTimes(2);
+    // Attempt 2: 1000 * 102 / 100 = 1020
+    expect(execute.mock.calls[1][0].amountIn).toBe(1020n);
+  });
+
+  it('returns false when all attempts return success=false without throwing', async () => {
+    const execute = jest.fn().mockResolvedValue({ success: false });
+    const result = await swapWithBuffer(execute, '0xcoinA', '0xcoinB', 1000n, 0.01, 3);
+    expect(result).toBe(false);
+    expect(execute).toHaveBeenCalledTimes(3);
+  });
+
+  it('rethrows the error from the last attempt when every attempt throws', async () => {
+    const execute = jest.fn().mockRejectedValue(new Error('swap error'));
+    await expect(
+      swapWithBuffer(execute, '0xcoinA', '0xcoinB', 1000n, 0.01, 3),
+    ).rejects.toThrow('swap error');
+    expect(execute).toHaveBeenCalledTimes(3);
+  });
+
+  it('recovers when early attempts throw but a later attempt succeeds', async () => {
+    const execute = jest.fn()
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockResolvedValueOnce({ success: true });
+    const result = await swapWithBuffer(execute, '0xcoinA', '0xcoinB', 1000n, 0.01, 3);
+    expect(result).toBe(true);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it('increases the amountIn by 1% per attempt', async () => {
+    const execute = jest.fn().mockResolvedValue({ success: false });
+    await swapWithBuffer(execute, '0xcoinA', '0xcoinB', 1000n, 0.01, 3);
+    // attempt 1: 1000 * 101/100 = 1010
+    // attempt 2: 1000 * 102/100 = 1020
+    // attempt 3: 1000 * 103/100 = 1030
+    expect(execute.mock.calls[0][0].amountIn).toBe(1010n);
+    expect(execute.mock.calls[1][0].amountIn).toBe(1020n);
+    expect(execute.mock.calls[2][0].amountIn).toBe(1030n);
   });
 });

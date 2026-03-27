@@ -1556,8 +1556,6 @@ export class RebalanceService {
     );
   }
 
-
-
   /**
    * Poll suiClient.getObject until the position object is accessible on the
    * Sui network or maxAttempts is exhausted.  The first check is immediate

@@ -1956,7 +1956,7 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
 
-  it('scales down when balances are still insufficient after swap attempt', async () => {
+  it('fails when balances are still insufficient after swap attempt', async () => {
     const { monitor, config, sdkService, createAddLiquidityFixTokenPayload } =
       makeInitialPositionScenario({ walletAmountA: '100000', walletAmountB: '100000' });
 
@@ -1964,10 +1964,9 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     const result = await svc.checkAndRebalance('0xpool');
 
     expect(result).not.toBeNull();
-    expect(result!.success).toBe(true);
-    const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
-    expect(callArgs.amount_a).toBe('99999');
-    expect(callArgs.amount_b).toBe('99999');
+    expect(result!.success).toBe(false);
+    expect(result!.error).toMatch(/Insufficient wallet balance to satisfy TOTAL_USD target/i);
+    expect(createAddLiquidityFixTokenPayload).not.toHaveBeenCalled();
   });
 
   it('keeps the initial-position safety buffer when a token-B deficit swap still finishes below the required amount', async () => {
@@ -2197,12 +2196,6 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
       signAndExecuteTransaction: jest.fn()
         .mockResolvedValueOnce({
           effects: successEffect,
-          digest: '0xswap',
-          balanceChanges: [],
-          objectChanges: [],
-        })
-        .mockResolvedValueOnce({
-          effects: successEffect,
           digest: '0xopen',
           balanceChanges: [],
           objectChanges: [{
@@ -2220,7 +2213,7 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
           effects: successEffect,
           digest: '0xadd-success',
         }),
-      getBalance: jest.fn().mockResolvedValue({ totalBalance: '2378820' }),
+      getBalance: jest.fn().mockResolvedValue({ totalBalance: '5000000' }),
       getCoins: jest.fn().mockResolvedValue({ data: [] }),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
     };
@@ -2228,7 +2221,7 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
     const sdkService = {
       getAddress: jest.fn().mockReturnValue('0xwallet'),
       getBalance: jest.fn().mockImplementation((coinType: string) =>
-        Promise.resolve(coinType === '0xcoinA' ? '2378820' : '998359')),
+        Promise.resolve(coinType === '0xcoinA' ? '5000000' : '5000000')),
       getSdk: jest.fn().mockReturnValue(mockSdk),
       getKeypair: jest.fn().mockReturnValue({}),
       getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
@@ -2252,8 +2245,8 @@ describe('createInitialPosition – TOTAL_USD converted token amounts', () => {
       fix_amount_a: boolean;
     };
 
-    expect(firstCallArgs.amount_a).toBe('998358');
-    expect(firstCallArgs.amount_b).toBe('998358');
+    expect(firstCallArgs.amount_a).toBe('4900000');
+    expect(firstCallArgs.amount_b).toBe('4900000');
 
     if (firstCallArgs.fix_amount_a) {
       expect(secondCallArgs.amount_a).toBe((BigInt(firstCallArgs.amount_a) - 1n).toString());

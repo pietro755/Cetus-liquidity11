@@ -340,6 +340,29 @@ export class RebalanceService {
         storedLiquidity,
       );
 
+      // Step 5: Top up the new position if its deposited amounts are below the
+      // TOTAL_USD-derived env targets.  This compensates for gas consumption
+      // between the two open-position steps and any safety-buffer reductions.
+      // The top-up is best-effort: failures are logged as warnings and do not
+      // roll back the successfully completed rebalance.
+      try {
+        await this.topUpPosition(
+          result.positionId!,
+          poolInfo,
+          lower,
+          upper,
+          result.depositedAmountA,
+          result.depositedAmountB,
+          required.requiredAmountA,
+          required.requiredAmountB,
+        );
+      } catch (topUpError) {
+        logger.warn('Top-up after rebalance failed (rebalance itself succeeded)', {
+          positionId: result.positionId,
+          error: topUpError instanceof Error ? topUpError.message : String(topUpError),
+        });
+      }
+
       logger.info('Rebalance completed', {
         oldRange: { lower: position.tickLower, upper: position.tickUpper },
         newRange: { lower, upper },
@@ -1139,7 +1162,7 @@ export class RebalanceService {
     amountA: string,
     amountB: string,
     storedLiquidity?: string,
-  ): Promise<{ transactionDigest?: string; positionId?: string }> {
+  ): Promise<{ transactionDigest?: string; positionId?: string; depositedAmountA: string; depositedAmountB: string }> {
     // Validate that amountA and amountB are valid non-negative integer strings.
     const isValidAmountString = (v: string) => /^\d+$/.test(v);
     if (!isValidAmountString(amountA)) {
@@ -1367,16 +1390,173 @@ export class RebalanceService {
       throw new Error('Add liquidity did not return a transaction digest');
     }
 
-    return { transactionDigest: addDigest, positionId: newPositionId };
+    return { transactionDigest: addDigest, positionId: newPositionId, depositedAmountA: currentAmountA, depositedAmountB: currentAmountB };
   }
 
   // ---------------------------------------------------------------------------
   // Private: top up position liquidity to match the closed position's amount
   // ---------------------------------------------------------------------------
 
-  // ---------------------------------------------------------------------------
-  // Private: wait for position object to be accessible on the Sui network
-  // ---------------------------------------------------------------------------
+  /**
+   * After opening a new position, compare the deposited amounts against the
+   * TOTAL_USD-derived required amounts ("env amounts").  If either token's
+   * deposited amount is below the required amount, attempt to add the deficit
+   * from the current wallet balance so the position matches the env target.
+   *
+   * This is best-effort: if the wallet balance cannot cover the deficit (e.g.
+   * gas consumption reduced balances) the method logs a warning instead of
+   * throwing.  A successful call leaves the position at or close to the env
+   * target without risking a partial failure rolling back the rebalance.
+   */
+  private async topUpPosition(
+    positionId: string,
+    poolInfo: PoolInfo,
+    tickLower: number,
+    tickUpper: number,
+    depositedAmountA: string,
+    depositedAmountB: string,
+    requiredAmountA: string,
+    requiredAmountB: string,
+  ): Promise<void> {
+    const bigDepositedA = BigInt(depositedAmountA || '0');
+    const bigDepositedB = BigInt(depositedAmountB || '0');
+    const bigRequiredA = BigInt(requiredAmountA || '0');
+    const bigRequiredB = BigInt(requiredAmountB || '0');
+
+    const deficitA = bigRequiredA > bigDepositedA ? bigRequiredA - bigDepositedA : 0n;
+    const deficitB = bigRequiredB > bigDepositedB ? bigRequiredB - bigDepositedB : 0n;
+
+    if (deficitA === 0n && deficitB === 0n) {
+      logger.info('Position amounts meet env target — no top-up needed', { positionId });
+      return;
+    }
+
+    logger.info('Position amounts below env target — attempting top-up', {
+      positionId,
+      depositedAmountA,
+      depositedAmountB,
+      requiredAmountA,
+      requiredAmountB,
+      deficitA: deficitA.toString(),
+      deficitB: deficitB.toString(),
+    });
+
+    const walletBalances = await this.readWalletTokenBalances(poolInfo);
+    const walletA = BigInt(walletBalances.amountA || '0');
+    const walletB = BigInt(walletBalances.amountB || '0');
+
+    const topUpA = deficitA > 0n ? (walletA < deficitA ? walletA : deficitA) : 0n;
+    const topUpB = deficitB > 0n ? (walletB < deficitB ? walletB : deficitB) : 0n;
+
+    if (topUpA === 0n && topUpB === 0n) {
+      logger.warn('Cannot top up position: insufficient wallet balance to cover deficit', {
+        positionId,
+        deficitA: deficitA.toString(),
+        deficitB: deficitB.toString(),
+        walletA: walletA.toString(),
+        walletB: walletB.toString(),
+      });
+      return;
+    }
+
+    logger.info('Topping up position with additional tokens', {
+      positionId,
+      topUpAmountA: topUpA.toString(),
+      topUpAmountB: topUpB.toString(),
+    });
+
+    const sdk = this.sdkService.getSdk();
+    const keypair = this.sdkService.getKeypair();
+    const suiClient = this.sdkService.getSuiClient();
+
+    let currentAmountA = topUpA.toString();
+    let currentAmountB = topUpB.toString();
+    let currentShouldFixAmountA = this.determineFixAmountA(
+      topUpA,
+      topUpB,
+      poolInfo,
+      tickLower,
+      tickUpper,
+    );
+
+    await this.retryTransaction(
+      async () => {
+        const addLiquidityParams: AddLiquidityFixTokenParams = {
+          pool_id: poolInfo.poolAddress,
+          pos_id: positionId,
+          coinTypeA: poolInfo.coinTypeA,
+          coinTypeB: poolInfo.coinTypeB,
+          amount_a: currentAmountA,
+          amount_b: currentAmountB,
+          fix_amount_a: currentShouldFixAmountA,
+          slippage: this.config.maxSlippage,
+          is_open: false,
+          tick_lower: String(tickLower),
+          tick_upper: String(tickUpper),
+          collect_fee: false,
+          rewarder_coin_types: [],
+        };
+
+        try {
+          let addTx;
+          try {
+            addTx = await sdk.Position.createAddLiquidityFixTokenPayload(addLiquidityParams);
+          } catch (sdkErr) {
+            logger.error('Top-up createAddLiquidityFixTokenPayload failed', {
+              error: sdkErr instanceof Error ? sdkErr.message : String(sdkErr),
+            });
+            throw sdkErr;
+          }
+          addTx.setGasBudget(this.config.gasBudget);
+
+          const addResult = await suiClient.signAndExecuteTransaction({
+            transaction: addTx,
+            signer: keypair,
+            options: { showEffects: true },
+          });
+
+          if (addResult.effects?.status?.status !== 'success') {
+            throw new Error(`Top-up add liquidity failed: ${addResult.effects?.status?.error || 'Unknown'}`);
+          }
+
+          logger.info('Position topped up successfully', {
+            positionId,
+            digest: addResult.digest,
+            addedAmountA: currentAmountA,
+            addedAmountB: currentAmountB,
+          });
+        } catch (addLiquidityError) {
+          const adjustedParams = await this.adjustAddLiquidityRetryParams(
+            addLiquidityError,
+            poolInfo,
+            tickLower,
+            tickUpper,
+            {
+              amountA: currentAmountA,
+              amountB: currentAmountB,
+              shouldFixAmountA: currentShouldFixAmountA,
+            },
+          );
+
+          if (adjustedParams) {
+            currentAmountA = adjustedParams.amountA;
+            currentAmountB = adjustedParams.amountB;
+            currentShouldFixAmountA = adjustedParams.shouldFixAmountA;
+            throw new RetryAddLiquidityWithAdjustedAmountsError(
+              addLiquidityError instanceof Error ? addLiquidityError.message : String(addLiquidityError),
+            );
+          }
+
+          throw addLiquidityError;
+        }
+      },
+      'top up position',
+      3,
+      2000,
+    );
+  }
+
+
 
   /**
    * Poll suiClient.getObject until the position object is accessible on the

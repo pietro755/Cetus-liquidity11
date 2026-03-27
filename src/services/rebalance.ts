@@ -1092,30 +1092,11 @@ export class RebalanceService {
         };
       }
 
-      const precision = 1_000_000_000_000n;
-      const scaleA = targetAmountA === 0n ? precision : (finalWalletAmountA * precision) / targetAmountA;
-      const scaleB = targetAmountB === 0n ? precision : (finalWalletAmountB * precision) / targetAmountB;
-      const scale = scaleA < scaleB ? scaleA : scaleB;
-
-      if (scale === 0n) {
-        throw new Error(`No usable balance to open ${positionContext}`);
-      }
-
-      const scaledAmountA = (targetAmountA * scale) / precision;
-      const scaledAmountB = (targetAmountB * scale) / precision;
-
-      logger.warn('Scaling down position size to fit wallet balance', {
-        positionContext,
-        scale: scale.toString(),
-      });
-      const finalAmountA = scaledAmountA.toString();
-      const finalAmountB = scaledAmountB.toString();
-
-      logger.debug(`[DEBUG] Final amounts used: A=${finalAmountA} B=${finalAmountB}`);
-      return {
-        amountA: finalAmountA,
-        amountB: finalAmountB,
-      };
+      throw new Error(
+        `Insufficient wallet balance to satisfy TOTAL_USD target for initial position. ` +
+        `Target A=${targetAmountAString} B=${targetAmountBString}, ` +
+        `available A=${finalWalletAmountA.toString()} B=${finalWalletAmountB.toString()}.`,
+      );
     }
 
     if (!swapResult.didSwap) {

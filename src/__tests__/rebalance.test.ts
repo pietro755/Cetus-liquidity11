@@ -373,7 +373,9 @@ describe('rebalance – live path uses fix-token add-liquidity', () => {
           objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
         // call 3: addLiquidity
-        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' })
+        // call 4: top-up addLiquidity (deposited amounts < required env amounts)
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xtopup' }),
       getBalance: jest.fn(),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
     };
@@ -393,7 +395,8 @@ describe('rebalance – live path uses fix-token add-liquidity', () => {
     expect(result!.success).toBe(true);
 
     // Must call the fix-token variant, NOT the delta-liquidity variant.
-    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(1);
+    // Called twice: once for the initial deposit, once for the top-up.
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(2);
     expect(createAddLiquidityPayload).not.toHaveBeenCalled();
 
     // The fix-token call must use env-configured amounts, not a stored delta_liquidity field.
@@ -479,7 +482,9 @@ describe('rebalance – step 2 retries on "not available for consumption"', () =
         // call 3: addLiquidity fails with the retryable error
         .mockRejectedValueOnce(new Error('Object 0xnewpos is not available for consumption'))
         // call 4: addLiquidity succeeds on retry
-        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' })
+        // call 5: top-up addLiquidity (deposited amounts < required env amounts)
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xtopup' }),
       getBalance: jest.fn(),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
     };
@@ -497,8 +502,8 @@ describe('rebalance – step 2 retries on "not available for consumption"', () =
 
     expect(result).not.toBeNull();
     expect(result!.success).toBe(true);
-    // createAddLiquidityFixTokenPayload must have been called twice (initial + 1 retry)
-    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(2);
+    // createAddLiquidityFixTokenPayload must have been called three times (initial + 1 retry + 1 top-up)
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -716,7 +721,9 @@ describe('rebalance – position object verification before add-liquidity', () =
           digest: '0xopen',
           objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
-        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' })
+        // call 4: top-up addLiquidity (deposited amounts < required env amounts)
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xtopup' }),
       getBalance: jest.fn(),
       getObject: getObjectMock,
     };
@@ -772,8 +779,8 @@ describe('rebalance – position object verification before add-liquidity', () =
 
     // getObject should have been polled exactly twice.
     expect(getObject).toHaveBeenCalledTimes(2);
-    // createAddLiquidityFixTokenPayload proceeds after verification.
-    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(1);
+    // createAddLiquidityFixTokenPayload proceeds after verification, then once more for top-up.
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(2);
   }, 10_000); // allow extra time for the 1.5 s retry delay
 
   it('returns failure when position object never becomes accessible', async () => {
@@ -1021,7 +1028,9 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
           digest: '0xopen',
           objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
-        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' })
+        // call 4: top-up addLiquidity (deposited amounts < required env amounts)
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xtopup' }),
       getBalance: jest.fn(),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos' } }),
     };
@@ -1040,7 +1049,8 @@ describe('rebalance – fix_amount_a is determined by price and tick range', () 
 
     expect(result).not.toBeNull();
     expect(result!.success).toBe(true);
-    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(1);
+    // Called twice: once for initial deposit, once for top-up.
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(2);
     return createAddLiquidityFixTokenPayload.mock.calls[0][0] as { fix_amount_a: boolean };
   }
 
@@ -1520,7 +1530,9 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
           digest: '0xopen',
           objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
-        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' })
+        // call 4: top-up addLiquidity (deposited amounts < required env amounts)
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xtopup' }),
       getBalance: jest.fn(),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos' } }),
     };
@@ -1539,7 +1551,8 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
 
     expect(result).not.toBeNull();
     expect(result!.success).toBe(true);
-    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(1);
+    // Called twice: once for initial deposit, once for top-up.
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(2);
 
     const callArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0] as {
       amount_a: string; amount_b: string;
@@ -1551,8 +1564,8 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
 
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
-    // 2 initial reads + 2 post-step-1 re-reads inside openNewPosition
-    expect(sdkService.getBalance).toHaveBeenCalledTimes(4);
+    // 2 initial reads + 2 post-step-1 re-reads inside openNewPosition + 2 top-up reads
+    expect(sdkService.getBalance).toHaveBeenCalledTimes(6);
     // No swap was needed, so the swap-specific Sui balance reads are still unused.
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
@@ -1668,7 +1681,9 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
           digest: '0xopen',
           objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
-        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' })
+        // call 4: top-up addLiquidity (deposited amounts < required env amounts)
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xtopup' }),
       getBalance: jest.fn(),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos' } }),
     });
@@ -1704,9 +1719,10 @@ describe('rebalance – configured amounts capped by wallet balance', () => {
     expect(result2!.success).toBe(true);
 
     // Both runs must produce identical amounts.
-    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(2);
+    // Called 4 times: 2 initial deposits (one per run) + 2 top-up calls (one per run).
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(4);
     const args1 = createAddLiquidityFixTokenPayload.mock.calls[0][0] as { amount_a: string; amount_b: string };
-    const args2 = createAddLiquidityFixTokenPayload.mock.calls[1][0] as { amount_a: string; amount_b: string };
+    const args2 = createAddLiquidityFixTokenPayload.mock.calls[2][0] as { amount_a: string; amount_b: string };
     expect(args1.amount_a).toBe('4900000');
     expect(args1.amount_b).toBe('4900000');
     expect(args2.amount_a).toBe('4900000');
@@ -2531,7 +2547,9 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
           objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
         })
         // call 3: addLiquidity
-        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' })
+        // call 4: top-up addLiquidity (deposited amounts < required env amounts)
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xtopup' }),
       // getBalance is only used inside swapTokensIfNeeded when a swap actually happens
       getBalance: jest.fn(),
       getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
@@ -2563,8 +2581,8 @@ describe('rebalancePosition – configured amounts capped by wallet balance', ()
     expect(callArgs.amount_a).toBe('4900000');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinA');
     expect(sdkService.getBalance).toHaveBeenCalledWith('0xcoinB');
-    // 2 initial reads + 2 post-step-1 re-reads inside openNewPosition
-    expect(sdkService.getBalance).toHaveBeenCalledTimes(4);
+    // 2 initial reads + 2 post-step-1 re-reads inside openNewPosition + 2 top-up reads
+    expect(sdkService.getBalance).toHaveBeenCalledTimes(6);
     // No swap was needed, so swap-specific Sui balance reads are still unused.
     expect(mockSuiClient.getBalance).not.toHaveBeenCalled();
   });
@@ -4135,6 +4153,319 @@ describe('wallet balance checks before opening a new position', () => {
     expect(result).not.toBeNull();
     expect(result!.success).toBe(false);
     expect(result!.error).toMatch(/No usable balance to open initial position/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Top-up after rebalance — topUpPosition logic
+// ---------------------------------------------------------------------------
+
+describe('rebalance – top-up after rebalance when deposited amounts are below env target', () => {
+  afterEach(() => { delete process.env.DRY_RUN; });
+
+  it('calls createAddLiquidityFixTokenPayload twice: once for initial deposit, once for top-up', async () => {
+    // TOTAL_USD=1,000,000, price=1 → requiredA=500000, requiredB=500000
+    // Wallet=999999999 → deposited (buffered) = 490000 each → deficit = 10000 each
+    // Top-up should add 10000 of each token to reach the env target.
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616', // 2^64 → price = 1
+      tickSpacing: 10,
+    });
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '1000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+        createAddLiquidityPayload: jest.fn(),
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xtopup' }),
+      getBalance: jest.fn(),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockResolvedValue('999999999'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    // createAddLiquidityFixTokenPayload must be called twice: initial + top-up.
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(2);
+
+    // The initial deposit uses the buffered (98%) amount.
+    const initialArgs = createAddLiquidityFixTokenPayload.mock.calls[0][0];
+    expect(initialArgs.amount_a).toBe('490000');
+    expect(initialArgs.amount_b).toBe('490000');
+    expect(initialArgs.pos_id).toBe('0xnewpos');
+
+    // The top-up deposit makes up the 2% deficit (500000 - 490000 = 10000 each).
+    const topUpArgs = createAddLiquidityFixTokenPayload.mock.calls[1][0];
+    expect(BigInt(topUpArgs.amount_a)).toBeGreaterThan(0n);
+    expect(BigInt(topUpArgs.amount_b)).toBeGreaterThanOrEqual(0n);
+    expect(topUpArgs.pos_id).toBe('0xnewpos');
+    expect(topUpArgs.is_open).toBe(false);
+
+    // Overall rebalance succeeds.
+    expect(mockSuiClient.signAndExecuteTransaction).toHaveBeenCalledTimes(4);
+  });
+
+  it('succeeds even when top-up signAndExecuteTransaction fails (best-effort)', async () => {
+    // The rebalance itself succeeded; the top-up is not critical.
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '1000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+      },
+    };
+
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' })
+        // Top-up transaction fails
+        .mockResolvedValueOnce({ effects: { status: { status: 'failure', error: 'network error' } }, digest: '0xfail' }),
+      getBalance: jest.fn(),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      getBalance: jest.fn().mockResolvedValue('999999999'),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    // Rebalance itself must still succeed even if top-up fails.
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+    expect(result!.transactionDigest).toBe('0xadd');
+  });
+
+  it('tops up a below-range (single-sided) position for token A', async () => {
+    // For a position where the current price is below the new range, only token A
+    // is accepted.  After the initial deposit (buffered at 98%), there should be a
+    // 2% deficit in A.  The top-up adds the deficit from the wallet.
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    // New range (600–800) is above current tick (500) → below-range scenario.
+    // Only token A is accepted. wallet B = 0 so no swap is needed.
+    // requiredA = totalUsd * 2^128 / sqrtPrice^2 = 1000000; amountA buffered = 980000.
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 600,
+      upperTick: 800,
+      totalUsd: '1000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+      },
+    };
+
+    // Pool tick (500) < tickLower (600) → below range → only A accepted, B=0 → no swap.
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xtopup' }),
+      getBalance: jest.fn(),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      // Wallet: plenty of A, zero B (below-range: no B needed, no swap triggered).
+      getBalance: jest.fn().mockImplementation((coinType: string) =>
+        Promise.resolve(coinType === '0xcoinA' ? '999999999' : '0')),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    // Below-range: initial deposit + top-up for A. Two calls total.
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(2);
+    const topUpArgs = createAddLiquidityFixTokenPayload.mock.calls[1][0];
+    // Top-up for A only (below range).
+    expect(topUpArgs.fix_amount_a).toBe(true);
+    expect(BigInt(topUpArgs.amount_a)).toBeGreaterThan(0n);
+    expect(topUpArgs.pos_id).toBe('0xnewpos');
+  });
+
+  it('skips top-up when wallet has no tokens to cover the deficit', async () => {
+    // Wallet is empty after the main deposit — no top-up possible.
+    process.env.DRY_RUN = 'false';
+
+    const pool = makePoolInfo({
+      currentTickIndex: 500,
+      currentSqrtPrice: '18446744073709551616',
+      tickSpacing: 10,
+    });
+    const pos = makePosition({ tickLower: -200, tickUpper: -100, liquidity: '5000000' });
+    const monitor = makeMonitor([pos], pool);
+    (monitor.isPositionInRange as jest.Mock).mockReturnValue(false);
+    (monitor.getPositions as jest.Mock).mockResolvedValue([pos]);
+
+    const config = {
+      gasBudget: 50_000_000,
+      maxSlippage: 0.01,
+      lowerTick: 400,
+      upperTick: 600,
+      totalUsd: '1000000',
+    } as any;
+
+    const mockTxStub = { setGasBudget: jest.fn() };
+    const successEffect = { status: { status: 'success' } };
+
+    const createAddLiquidityFixTokenPayload = jest.fn().mockResolvedValue(mockTxStub);
+    const mockSdk = {
+      Position: {
+        removeLiquidityTransactionPayload: jest.fn().mockResolvedValue(mockTxStub),
+        openPositionTransactionPayload: jest.fn().mockReturnValue(mockTxStub),
+        createAddLiquidityFixTokenPayload,
+      },
+    };
+
+    let getBalanceCallCount = 0;
+    const mockSuiClient = {
+      signAndExecuteTransaction: jest.fn()
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xremove' })
+        .mockResolvedValueOnce({
+          effects: successEffect,
+          digest: '0xopen',
+          objectChanges: [{ type: 'created', objectType: 'position', objectId: '0xnewpos', owner: { AddressOwner: '0xwallet' } }],
+        })
+        .mockResolvedValueOnce({ effects: successEffect, digest: '0xadd' }),
+      getBalance: jest.fn(),
+      getObject: jest.fn().mockResolvedValue({ data: { objectId: '0xnewpos', type: 'position' } }),
+    };
+
+    const sdkService = {
+      getAddress: jest.fn().mockReturnValue('0xwallet'),
+      // First 4 calls return enough to satisfy required amounts (no swap triggered);
+      // calls 5+ (top-up's readWalletTokenBalances) return 0 to simulate wallet empty.
+      getBalance: jest.fn().mockImplementation(() => {
+        getBalanceCallCount++;
+        if (getBalanceCallCount <= 4) return Promise.resolve('500001');
+        return Promise.resolve('0'); // wallet empty for top-up check
+      }),
+      getSdk: jest.fn().mockReturnValue(mockSdk),
+      getKeypair: jest.fn().mockReturnValue({}),
+      getSuiClient: jest.fn().mockReturnValue(mockSuiClient),
+    } as any;
+
+    const svc = new RebalanceService(sdkService, monitor, config);
+    const result = await svc.checkAndRebalance('0xpool');
+
+    // Rebalance succeeds; top-up was skipped (wallet empty).
+    expect(result).not.toBeNull();
+    expect(result!.success).toBe(true);
+
+    // Only one createAddLiquidityFixTokenPayload call (the initial deposit) since top-up is skipped.
+    expect(createAddLiquidityFixTokenPayload).toHaveBeenCalledTimes(1);
+    // Only 3 signAndExecuteTransaction calls (remove, open, add) — no top-up call.
+    expect(mockSuiClient.signAndExecuteTransaction).toHaveBeenCalledTimes(3);
   });
 });
 

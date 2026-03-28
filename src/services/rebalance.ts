@@ -1099,6 +1099,11 @@ export class RebalanceService {
     );
 
     if (!hasSufficientAfterSwap && positionContext === 'initial position') {
+      // If the wallet is completely empty there is no recovery path.
+      if (finalWalletAmountA === 0n && finalWalletAmountB === 0n) {
+        throw new Error('No usable balance to open initial position');
+      }
+
       const targetAmountAString = amounts.usableAmountA ?? amounts.requiredAmountA;
       const targetAmountBString = amounts.usableAmountB ?? amounts.requiredAmountB;
       const targetAmountA = BigInt(targetAmountAString);
@@ -1115,11 +1120,21 @@ export class RebalanceService {
         };
       }
 
-      throw new Error(
-        `Insufficient wallet balance to satisfy TOTAL_USD target for initial position. ` +
-        `Target A=${targetAmountAString} B=${targetAmountBString}, ` +
-        `available A=${finalWalletAmountA.toString()} B=${finalWalletAmountB.toString()}.`,
-      );
+      // The swap moved the token balance toward the needed allocation but still
+      // did not reach the TOTAL_USD target.  Proceed with whatever is available
+      // (amounts are capped at the usable limits in the normal return below).
+      // Only throw if the swap was entirely ineffective (neither token increased).
+      const swapImprovedBalance =
+        finalWalletAmountA > walletAmountA || finalWalletAmountB > walletAmountB;
+      if (!swapImprovedBalance) {
+        throw new Error(
+          `Insufficient wallet balance to satisfy TOTAL_USD target for initial position. ` +
+          `Target A=${targetAmountAString} B=${targetAmountBString}, ` +
+          `available A=${finalWalletAmountA.toString()} B=${finalWalletAmountB.toString()}.`,
+        );
+      }
+      // Falls through to the normal return path; computeFinalAmount caps amounts
+      // at the usable limits so the deposit respects the TOTAL_USD env setting.
     }
 
     if (!swapResult.didSwap) {
